@@ -118,31 +118,34 @@ class DualMode(unittest.TestCase):
         self.assertEqual(t2, self.text)
 
     # ------------------------------------------------------------------ refusals
-    def test_inconsistent_offsets_refused_with_reason(self):
+    def test_inconsistent_offsets_pass_limits_with_least_into_material_split(self):
+        # synthetic offsets like the real printer: T2-T0 = +0.10, T3-T1 = -0.13 (Z); Y residual 0.21
         plan, d = make_dual_plan(self.dual, self.bad_prof)
-        self.assertIsNotNone(plan)                     # preview still available
-        codes = {x.code for x in d.errors}
-        self.assertIn("PLAN_PAIR_Z_CONSISTENCY", codes)
-        self.assertIn("PLAN_PAIR_Y_REGISTRATION", codes)
+        self.assertTrue(d.ok(), d.render())
+        ck = {c["name"]: c for c in plan.checks}
+        for name in ("pair_z_consistency", "pair_y_registration", "into_material", "travel_drag"):
+            self.assertTrue(ck[name]["ok"], ck[name]["detail"])
+        self.assertEqual(plan.z_split, "least_into_material")
+        self.assertIn("Fix applied", ck["into_material"]["detail"])
+        self.assertLessEqual(plan.z_splits["least_into_material"]["max_into_material"], 0.03)
 
-    def test_z_residual_located_in_this_model(self):
-        plan, d = make_dual_plan(self.dual, self.bad_prof)
+    def test_symmetric_split_still_blocked_by_into_material(self):
+        # the Z deviation (0.115) is within 0.30, but the separate into-material check is NOT relaxed
+        from quadro_studio.dualplan import DualOptions
+        plan, d = make_dual_plan(self.dual, self.bad_prof, DualOptions(z_split="symmetric"))
+        ck = {c["name"]: c for c in plan.checks}
+        self.assertTrue(ck["pair_z_consistency"]["ok"])
+        self.assertFalse(ck["into_material"]["ok"])
+        self.assertIn("PLAN_INTO_MATERIAL", {x.code for x in d.errors})
         za = plan.z_analysis
-        self.assertIsNotNone(za)
-        self.assertIn("colour_change_thickness", za["blocking"])
+        self.assertNotIn("z_deviation", za["blocking"])
+        self.assertIn("nozzle_into_material", za["blocking"])
         # colours swap halves every 10 layers: the vertical colour change is at layer 11
-        layers = set()
-        for side in ("left", "right"):
-            for it in za["sides"][side]["examples"]["colour_change_interior"]:
-                layers.add(it["layer"])
-                self.assertIn("below", it)
-                self.assertTrue(it["thickness"] < 0.08 or it["thickness"] > 0.30)
-        self.assertEqual(layers, {11})
-        # one side's colour 2 is lower: its nozzle runs into colour 1 beside it
-        sinks = [za["sides"][s]["stats"]["sink_extrude"]["points"] for s in ("left", "right")]
-        self.assertTrue(any(sinks))
-        detail = next(c for c in plan.checks if c["name"] == "pair_z_consistency")["detail"]
-        self.assertIn("In this model", detail)
+        layers = {it["layer"] for side in ("left", "right") for it in za["sides"][side]["examples"]["colour_change_interior"]}
+        self.assertTrue(layers <= {11} or not layers)
+        text, info = generate_dual(self.dual, self.bad_prof, plan)
+        res, _ = self.verify_text(text, self.bad_prof)
+        self.assertIn("DUAL_INTO_MATERIAL", res["issue_counts"])
 
     def test_z_lattice_matches_planned_heights(self):
         from quadro_studio.dualz import _Lattice
@@ -160,9 +163,10 @@ class DualMode(unittest.TestCase):
     def test_y_residual_reported_separately(self):
         plan, d = make_dual_plan(self.dual, self.bad_prof)
         y = next(c for c in plan.checks if c["name"] == "pair_y_registration")
-        self.assertFalse(y["ok"])
-        self.assertIn("separate from Z", y["detail"])
-        self.assertGreater(plan.pair_y["registration_error"], 0.10)
+        self.assertTrue(y["ok"])
+        self.assertIn("Separate from Z", y["detail"])
+        self.assertAlmostEqual(plan.pair_y["registration_error"], 0.21, places=4)
+        self.assertEqual(y["limit"], 0.30)
 
     def test_consistent_offsets_no_z_findings(self):
         self.assertIsNone(self.plan.z_analysis)
@@ -204,13 +208,15 @@ class DualMode(unittest.TestCase):
             load_dual(p)
         self.assertIn("DUAL_NOT_COPYABLE", cm.exception.diags.render())
 
-    def test_forced_inconsistent_output_fails_verification(self):
-        plan, _ = make_dual_plan(self.dual, self.bad_prof)
+    def test_inconsistent_offsets_output_passes_verification_within_limits(self):
+        plan, d = make_dual_plan(self.dual, self.bad_prof)
         text, _ = generate_dual(self.dual, self.bad_prof, plan)
         res, sim = self.verify_text(text, self.bad_prof)
-        self.assertFalse(res["passed"])
-        self.assertIn("DUAL_REGISTRATION", res["issue_counts"])
-        self.assertIn("COPY_THICKNESS", res["issue_counts"])
+        self.assertTrue(res["passed"], res["issues"][:4])
+        self.assertAlmostEqual(res["dual_registration_mm"]["left"], 0.21, delta=2e-3)
+        self.assertEqual(res["dual_into_material"]["points"], 0)
+        self.assertEqual(res["dual_travel_drag"]["moves"], 0)
+        self.assertLessEqual(res["dual_z_deviation"]["max_mm"], 0.30)
 
     def test_models_coloured_differently_refused(self):
         p = synth_dual.write(os.path.join(self.tmp, "patch.gcode"), layers=LAYERS, differ_layer=6, right_patch=True)
@@ -271,6 +277,109 @@ class DualMode(unittest.TestCase):
         m[k + 1] = q.replace("T3=%s" % re.search(r"T3=([-\d.]+)", q).group(1), "T3=%.5f" % (t3 - 20.0))
         res, _ = self.verify_text("\n".join(m))
         self.assertIn("CARRIAGE_DETOUR", res["issue_counts"])
+
+
+FLAT = [synth_profile.mesh_block(fn=lambda x, y: 0.0)]
+
+
+def _offsets(ry=0.0):
+    """Consistent Z offsets; Y offsets with a pair Y residual of exactly ry (k = -2 ry)."""
+    return {"T0": {"x": 0.0, "y": 0.0, "z": 0.0}, "T1": {"x": 0.06, "y": 0.0, "z": 0.15},
+            "T2": {"x": -1.55, "y": 0.0, "z": 0.10}, "T3": {"x": -1.74, "y": 2 * ry, "z": 0.25}}
+
+
+class DualThresholds(unittest.TestCase):
+    """Owner limits (dualtol): Y 0.30 mm, Z deviation 0.30 mm; below, equal, above, in the planner
+    AND the independent verifier; into-material stays separate."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.slice = synth_dual.write(os.path.join(cls.tmp, "d.gcode"), layers=LAYERS)
+        cls.dual, _ = load_dual(cls.slice)
+
+    def prof(self, ry):
+        return load_profile(synth_profile.build(os.path.join(self.tmp, "p%.3f.zip" % ry), meshes=FLAT, offsets=_offsets(ry)))[0]
+
+    def test_within_rule(self):
+        from quadro_studio.dualtol import within, DUAL_LIMITS
+        self.assertEqual(DUAL_LIMITS["y_registration"], 0.30)
+        self.assertEqual(DUAL_LIMITS["z_deviation"], 0.30)
+        self.assertEqual(DUAL_LIMITS["into_material"], 0.03)
+        self.assertTrue(within(0.29, 0.30))
+        self.assertTrue(within(0.30, 0.30))
+        self.assertFalse(within(0.31, 0.30))
+        self.assertFalse(within(-0.31, 0.30))
+
+    def test_y_planner_and_verifier_below_equal_above(self):
+        for ry, ok in ((0.29, True), (0.30, True), (0.31, False)):
+            p = self.prof(ry)
+            plan, d = make_dual_plan(self.dual, p)
+            y = next(c for c in plan.checks if c["name"] == "pair_y_registration")
+            self.assertEqual(y["ok"], ok, (ry, y["detail"]))
+            self.assertEqual(d.ok(), ok, (ry, d.render()))
+            text, _ = generate_dual(self.dual, p, plan)
+            out = os.path.join(self.tmp, "y%.2f.gcode" % ry)
+            with open(out, "w") as f:
+                f.write(text)
+            res, _ = verify_dual(p, self.dual.models, out, plan.foundation_layers)
+            self.assertAlmostEqual(res["dual_registration_mm"]["left"], ry, delta=2e-4)
+            self.assertEqual("DUAL_REGISTRATION" in res["issue_counts"], not ok, (ry, res["issue_counts"]))
+            self.assertEqual(res["passed"], ok, (ry, res["issues"][:3]))
+
+    def test_z_planner_below_equal_above(self):
+        from quadro_studio.dualz import analyse_z
+        p = self.prof(0.0)
+        plan, d = make_dual_plan(self.dual, p)
+        self.assertTrue(d.ok(), d.render())
+        base = plan.dstar
+        for dz, over in ((0.29, False), (0.30, False), (0.31, True)):
+            plan.dstar = base - dz              # colour 2 dz lower than colour 1 on both models
+            za = analyse_z(self.dual, plan)
+            mx = max(v["stats"]["colour_change_interior"]["max_abs_deviation"] for v in za["sides"].values())
+            self.assertAlmostEqual(mx, dz, delta=2e-4)
+            self.assertEqual("z_deviation" in za["blocking"], over, (dz, mx))
+            self.assertIn("nozzle_into_material", za["blocking"])     # separate check, still enforced
+        plan.dstar = base
+
+    def test_z_verifier_below_equal_above(self):
+        p = self.prof(0.0)
+        plan, d = make_dual_plan(self.dual, p)
+        text, _ = generate_dual(self.dual, p, plan)
+        lines = text.split("\n")
+        for dz, over in ((0.29, False), (0.30, False), (0.31, True)):
+            out, inb = [], False
+            for l in lines:
+                if l.startswith("; FARM_PART"):
+                    m = re.search(r"layer=(\d+) slot=0 tools=(\S+)", l)
+                    inb = m.group(2) == "2,3" and int(m.group(1)) > plan.foundation_layers
+                elif l.startswith(("; FARM_TRANSFER", "; FARM_PARK", "; DUAL_TOWER", "SET_DUAL_CARRIAGE")):
+                    inb = False
+                if inb and l.startswith("G1") and " Z" in l:
+                    l = re.sub(r" Z([-\d.]+)", lambda mm: " Z%.5f" % (float(mm.group(1)) - dz), l)
+                out.append(l)
+            path = os.path.join(self.tmp, "z%.2f.gcode" % dz)
+            with open(path, "w") as f:
+                f.write("\n".join(out))
+            res, _ = verify_dual(p, self.dual.models, path, plan.foundation_layers)
+            self.assertAlmostEqual(res["dual_z_deviation"]["max_mm"], dz, delta=2e-4)
+            self.assertEqual("DUAL_Z_DEVIATION" in res["issue_counts"], over, (dz, res["dual_z_deviation"]))
+            self.assertIn("DUAL_INTO_MATERIAL", res["issue_counts"])   # separate check, still enforced
+
+    def test_raised_travel_removes_drags_and_is_verified(self):
+        from quadro_studio.dualplan import DualOptions
+        p = load_profile(synth_profile.build(os.path.join(self.tmp, "bad.zip")))[0]
+        plan, d = make_dual_plan(self.dual, p, DualOptions(z_split="symmetric"))
+        text, info = generate_dual(self.dual, p, plan)
+        out = os.path.join(self.tmp, "lift.gcode")
+        with open(out, "w") as f:
+            f.write(text)
+        res, _ = verify_dual(p, self.dual.models, out, plan.foundation_layers)
+        if plan.travel_lift:
+            self.assertGreater(info.get("raised_travels", 0), 0)
+            self.assertGreater(res["raised_travel_z_moves"], 0)
+        self.assertEqual(res["dual_travel_drag"]["moves"], 0, res["dual_travel_drag"])
+        self.assertEqual(res["visits_failed"], 0, res["visits_failed_examples"])
 
 
 class CopyPreheat(unittest.TestCase):

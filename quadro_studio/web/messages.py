@@ -43,8 +43,10 @@ PLAIN = {
     "DUAL_TOOLS": "This file is not a four-tool, two-colour slice with two models (left: T0 and T2, right: T1 and T3).",
     "DUAL_MISSING_REGION": "One of the four tools has nothing to print on some layers; every head needs its colour region on every layer.",
     "DUAL_LAYERS": "The four tools of this slice do not share the same layers.",
-    "PLAN_PAIR_Z_CONSISTENCY": "Height (Z): each pair prints both models at one shared height, and with these Z tool offsets the two colours of a model sit at different heights. In this model that makes colour layers too thick or thin, or lets a nozzle run lower than the other colour beside it (layer, head and position are listed in the layout).",
-    "PLAN_PAIR_Y_REGISTRATION": "Colour alignment (Y): each pair prints both models at one shared Y, and with these Y tool offsets the two colours of each model are shifted against each other by more than allowed. Matching the heights does not fix this.",
+    "PLAN_PAIR_Z_CONSISTENCY": "Height (Z): where one colour is printed on the other, the layer is further from its nominal height than allowed (each pair prints both models at one shared height).",
+    "PLAN_PAIR_Y_REGISTRATION": "Colour alignment (Y): the two colours of a model are shifted against each other by more than allowed (each pair prints both models at one shared Y).",
+    "PLAN_INTO_MATERIAL": "A nozzle would print or descend lower than the other colour's material beside or below it (layer, head and position are listed in the layout).",
+    "PLAN_TRAVEL_DRAG": "A travel or wipe would pass through the other colour's material.",
     "PLAN_TOWER_CLEARANCE": "The wipe towers would be too close to the models.",
     "PLAN_PAIR_PARKS": "A printing pair would come too close to the parked heads.",
     "PLAN_PAIR_A_SPACING": "T0 and T1 would be too close together while printing together.",
@@ -97,6 +99,9 @@ VERIFY_PLAIN = {
     "DUAL_PRIME": "A head's prime line is missing or not directly before its first print.",
     "TOWER_THICKNESS": "A wipe tower layer has the wrong thickness.",
     "TOWER_BASE": "A wipe tower layer has nothing below it.",
+    "DUAL_Z_DEVIATION": "Where one colour is printed on the other, the layer is further from its nominal height than allowed.",
+    "DUAL_INTO_MATERIAL": "A nozzle prints or descends lower than the other colour's material.",
+    "DUAL_TRAVEL_DRAG": "A travel or wipe passes through the other colour's material.",
     "CARRIAGE_DETOUR": "A waiting head is moved towards the printing heads and back (unnecessary carriage travel).",
 }
 
@@ -161,4 +166,8 @@ def verify_summary(res, exit_code):
         parked_heads_stayed=(res.get("parked_heads") or {}).get("stayed_parked"),
         mode=res.get("mode"), region_layers_ok=res.get("dual_region_layers_ok"),
         registration_mm=res.get("dual_registration_mm"), min_gap_models_mm=res.get("min_gap_between_models_mm"),
-        tower_gap_mm=res.get("tower_min_gap_to_models_mm"))
+        tower_gap_mm=res.get("tower_min_gap_to_models_mm"),
+        z_deviation_mm=(res.get("dual_z_deviation") or {}).get("max_mm"),
+        into_material_mm=(res.get("dual_into_material") or {}).get("deepest_seen_mm"),
+        travel_drag_mm=(res.get("dual_travel_drag") or {}).get("deepest_seen_mm"),
+        limits=res.get("dual_limits"))

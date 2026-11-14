@@ -340,6 +340,7 @@ class Sim:
         tol = TOL["xy_align"]
         n_s = len(smoves)
         i = 0
+        raised = False
         status = "complete"
         while i < n_s:
             sm = smoves[i]
@@ -353,6 +354,10 @@ class Sim:
                 while j < len(recs):
                     r = recs[j]
                     j += 1
+                    if r[9] == "z" and sm.kind in ("travel", "wipe") and getattr(self, "allow_travel_lift", False) and not pcs:
+                        self.travel_lifts.append((r[0], t, L, sm.line))
+                        raised = True
+                        continue
                     if r[9] not in ("ext", "wipe", "travel"):
                         j -= 1
                         break
@@ -374,6 +379,11 @@ class Sim:
                 if not matched:
                     status = "mismatch at slicer line %d (%s)" % (sm.line, sm.kind)
                     break
+                if raised and j < len(recs) and recs[j][9] == "z":
+                    # the lowering z move that ends a (run of) raised travel(s)
+                    self.travel_lifts.append((recs[j][0], t, L, sm.line))
+                    raised = False
+                    j += 1
                 za.append(zt); ea.append(esum); fa.append(f)
                 if sm.kind == "extrude" and 1 < L <= self.found_layers:
                     self.check_found_e(t, L, sm, pcs, esum, blk.height)
@@ -640,6 +650,10 @@ class Sim:
         """Slice model nozzle t reproduces (Dual mode: the pair primary's region)."""
         return self.model
 
+    def plane_key(self, t, v):
+        """Deposits the local-thickness plane fit is taken from (Dual: per model AND colour)."""
+        return self.owner_key(t, v)
+
     def owner_key(self, t, v):
         """Deposit owner used for own-copy thickness and travel checks."""
         return (t, v["d"][t])
@@ -685,7 +699,7 @@ class Sim:
                 if abs(dev) > TOL["first_layer"]:
                     self.issue("error", "FIRST_LAYER_HEIGHT", "T%d layer-1 nozzle %.4f mm above bed (nominal %.3f)" % (t, z1 - mz, mdl.blocks[0].z), ln)
             # local thickness via plane fit on previous layer of the same copy
-            layers = self.copy_layers.setdefault(owner, {})
+            layers = self.copy_layers.setdefault(self.plane_key(t, v), {})
             cur = layers.get(L)
             if cur is None:
                 cur = layers[L] = PlaneCells()

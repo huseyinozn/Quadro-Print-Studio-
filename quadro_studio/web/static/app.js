@@ -372,10 +372,13 @@
         ex.map(f => `<tr data-layer="${f.layer}"><td><button type="button" class="lnk" data-goto="${f.layer}">${f.layer}</button></td><td>${f.head} · ${f.model}</td><td>${f.x}, ${f.y}</td><td>${KIND[f.kind]}: ${f.thickness !== undefined ? f.thickness.toFixed(3) + " mm thick on " + escapeHtml(f.below) : f.depth.toFixed(3) + " mm into " + escapeHtml(f.beside || f.over)}</td></tr>`).join("") + `</tbody></table>` : "");
     }
     const cm = chk("colour_mapping"), cz = chk("pair_z_consistency"), cy = chk("pair_y_registration");
-    const sec = (title, c, extra) => `<div class="${c.ok ? "okb" : "why"}"><b>${c.ok ? "✓" : "✗"} ${title}</b><div>${escapeHtml(c.detail.split(" In this model:")[0])}</div>${extra || ""}</div>`;
-    const why = sec("Colour mapping", cm) + sec("Height (Z)", cz, zHtml) + sec("Colour alignment (Y)", cy) +
-      L.checks.filter(c => !c.ok && !["colour_mapping", "pair_z_consistency", "pair_y_registration"].includes(c.name))
-        .map(c => `<div class="why">✗ ${escapeHtml(c.detail)}</div>`).join("");
+    const ci = chk("into_material"), ct = chk("travel_drag");
+    const dev = (c) => (c.value !== undefined && c.limit !== undefined) ? `<div class="devline">Deviation <b>${Number(c.value).toFixed(3)} mm</b> · limit ${Number(c.limit).toFixed(2)} mm</div>` : "";
+    const sec = (title, c, extra) => `<div class="${c.ok ? "okb" : "why"}" data-check="${escapeHtml(title)}"><b>${c.ok ? "✓" : "✗"} ${title}</b>${dev(c)}<div>${escapeHtml(c.detail)}</div>${extra || ""}</div>`;
+    const why = sec("Colour mapping", cm) + sec("Colour alignment (Y)", cy) + sec("Height (Z)", cz) +
+      sec("Nozzle into the other colour", ci, (L.z_blocking || []).includes("nozzle_into_material") ? zHtml : "") +
+      sec("Travels and wipes", ct) +
+      L.checks.filter(c => !c.ok && !["colour_mapping", "pair_z_consistency", "pair_y_registration", "into_material", "travel_drag"].includes(c.name))        .map(c => `<div class="why">✗ ${escapeHtml(c.detail)}</div>`).join("");
     mp.innerHTML = `<table class="map"><thead><tr><th>Head</th><th>Model</th><th>Colour</th><th>Layers 1–${F}</th><th>From layer ${F + 1}</th></tr></thead><tbody>` +
       L.mapping.map(r => `<tr data-head="${r.head}"><td>${HEADS[r.head]}</td><td>${MODEL[r.model]}</td><td><span class="sw" style="background:${L.colours[r.head]}"></span>${r.colour}</td><td>alone</td><td>with ${r.pair.replace("T" + r.head, "").replace(" + ", "").trim()} (pair ${r.pair})</td></tr>`).join("") +
       `</tbody></table>` +
@@ -530,7 +533,10 @@
         <div class="ok-box">Software checks passed</div>
         <div class="facts">
           <span>Colour regions reproduced (per head, all layers)</span><b id="dual-regions">${["T0", "T1", "T2", "T3"].map(h => `${h} ${reg[h] || "–"}`).join(" · ")}</b>
-          <span>Colour registration left / right model</span><b>${fmt((v.registration_mm || {}).left, 3)} / ${fmt((v.registration_mm || {}).right, 3)} mm</b>
+          <span>Colour alignment (Y) left / right model</span><b id="dual-y">${fmt((v.registration_mm || {}).left, 3)} / ${fmt((v.registration_mm || {}).right, 3)} mm (limit ${fmt((v.limits || {}).y_registration, 2)})</b>
+          <span>Height (Z) where colours stack, largest deviation</span><b id="dual-z">${fmt(v.z_deviation_mm, 3)} mm (limit ${fmt((v.limits || {}).z_deviation, 2)})</b>
+          <span>Nozzle below the other colour, deepest</span><b>${fmt(v.into_material_mm, 3)} mm (limit ${fmt((v.limits || {}).into_material, 2)})</b>
+          <span>Travel/wipe below the other colour, deepest</span><b>${fmt(v.travel_drag_mm, 3)} mm (limit ${fmt((v.limits || {}).into_material, 2)})</b>
           <span>Pairs print together from layer</span><b>${v.synchronized_from_layer ?? "–"}</b>
           <span>Gap between the two models</span><b>${fmt(v.min_gap_models_mm)} mm</b>
           <span>Wipe towers from the models</span><b>${fmt(v.tower_gap_mm)} mm</b>

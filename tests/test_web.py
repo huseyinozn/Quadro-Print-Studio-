@@ -192,32 +192,26 @@ class WebExamplesAndMeshMarks(WebBase):
         self.assertEqual(r["layout"]["count"], 40)
         self.assertEqual(r["model"]["layers"], 83)
 
-    def test_fidget_example_right_copy_from_left_refused_by_z_and_y(self):
-        # the example's right copy is built from the left model's T0/T2 regions (colour mapping OK);
-        # the synthetic profile's offsets are inconsistent: refused for Z (with located findings) and Y
+    def test_fidget_example_within_owner_limits_is_planned(self):
+        # right copy built from the left model's T0/T2 regions; the synthetic offsets give a
+        # 0.21 mm Y and a split Z deviation within the 0.30 mm owner limits; the into-material and
+        # travel checks are reported separately and pass with the chosen pair-B height
         st, r = self.plan_example("fidgets-2c")
         self.assertEqual(st, 200)
-        self.assertEqual(r["state"], "rejected")
-        codes = {p["code"] for p in r["problems"]}
-        self.assertNotIn("DUAL_NOT_COPYABLE", codes)
-        self.assertIn("PLAN_PAIR_Z_CONSISTENCY", codes)
-        self.assertIn("PLAN_PAIR_Y_REGISTRATION", codes)
+        self.assertEqual(r["state"], "planned", r.get("problems"))
         L = r["layout"]
-        self.assertEqual(L["mode"], "dual")
-        self.assertTrue(next(c for c in L["checks"] if c["name"] == "colour_mapping")["ok"])
+        ck = {c["name"]: c for c in L["checks"]}
+        self.assertTrue(ck["colour_mapping"]["ok"])
+        for name in ("pair_y_registration", "pair_z_consistency"):
+            self.assertTrue(ck[name]["ok"])
+            self.assertLessEqual(ck[name]["value"], ck[name]["limit"])
+            self.assertEqual(ck[name]["limit"], 0.30)
+        self.assertTrue(ck["into_material"]["ok"])
+        self.assertTrue(ck["travel_drag"]["ok"])
         self.assertEqual([(m["head"], m["model"], m["colour"]) for m in L["mapping"]],
                          [(0, "left", 1), (1, "right", 1), (2, "left", 2), (3, "right", 2)])
-        self.assertEqual(L["region_marks"], [])
-        self.assertTrue(L["z_blocking"])
-        f = L["z_findings"][0]
-        for k in ("layer", "head", "x", "y", "kind"):
-            self.assertIn(k, f)
-        for Lk, per in L["regions"].items():
-            self.assertEqual(sorted(per), ["0", "1", "2", "3"])
-        st, _, _ = self.req("/api/generate/" + r["job_id"], b"", "application/octet-stream", "POST")
-        self.assertEqual(st, 409)
         st, _, _ = self.req("/api/download/" + r["job_id"])
-        self.assertEqual(st, 403)
+        self.assertEqual(st, 403)                                  # nothing before verification
 
     def test_own_upload_of_differently_coloured_models_not_changed(self):
         # the same file uploaded as the user's own model: its right model is NOT silently replaced

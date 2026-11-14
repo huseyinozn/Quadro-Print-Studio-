@@ -97,7 +97,7 @@ def _samples(segs, spacing):
     return np.concatenate(xs), np.concatenate(ys), np.concatenate(idx)
 
 
-def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
+def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40):
     """Replays both models. Returns a JSON-able report; ``blocking`` lists the
     finding kinds that violate a criterion."""
     src = {t: dual.models[PAIR[PAIR_OF[t]][0]] for t in range(4)}     # T1 copies T0's paths, T3 copies T2's
@@ -110,13 +110,15 @@ def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
     slot = plan.slots[0]
     nozzle_r = plan.options.get("nozzle_radius", 0.2)
     sides = {"left": (0, 2), "right": (1, 3)}
-    hmin, hmax = h_limits
+    from .dualtol import DUAL_LIMITS, EPS
+    sink_tol = DUAL_LIMITS["into_material"] if sink_tol is None else sink_tol
+    z_dev = DUAL_LIMITS["z_deviation"] if z_dev is None else z_dev
     nL = len(plan.layer_z)
     F = plan.foundation_layers
     pad = 1.0
     gx = int(math.ceil((bx1 - bx0 + 2 * pad) / RES)) + 1
     gy = int(math.ceil((by1 - by0 + 2 * pad) / RES)) + 1
-    report = dict(raster_mm=RES, sink_tolerance_mm=sink_tol, thickness_limits_mm=[hmin, hmax],
+    report = dict(raster_mm=RES, into_material_limit_mm=sink_tol, z_deviation_limit_mm=z_dev,
                   nozzle_opening_radius_mm=nozzle_r, sides={})
     kernels = {}
     blocking = set()
@@ -126,13 +128,16 @@ def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
         top = np.full((gx, gy), -1e9)
         topc = np.zeros((gx, gy), dtype=np.int8)       # colour of the top material
         topl = np.zeros((gx, gy), dtype=np.int16)      # layer of the top material
-        stats = dict(colour_change_interior=dict(cells=0, out_of_limits=0, min=None, max=None, layers=set()),
-                     colour_change_edge=dict(cells=0, out_of_limits=0, min=None, max=None, layers=set()),
+        stats = dict(colour_change_interior=dict(cells=0, out_of_limits=0, min=None, max=None, max_abs_deviation=0.0, layers=set()),
+                     colour_change_edge=dict(cells=0, out_of_limits=0, min=None, max=None, max_abs_deviation=0.0, layers=set()),
+                     into_lower_layer=dict(points=0, max_depth=0.0, layers=set()),
                      sink_extrude=dict(points=0, max_depth=0.0, layers=set()),
                      sink_travel=dict(moves=0, max_depth=0.0, layers=set()),
                      colour_change_over_gap=dict(cells=0, min=None, max=None),
-                     same_colour=dict(min=None, max=None))
-        items = dict(colour_change_interior=[], colour_change_edge=[], sink_extrude=[], sink_travel=[])
+                     same_colour=dict(min=None, max=None), deepest=dict(extrude=0.0, travel=0.0))
+        items = dict(colour_change_interior=[], colour_change_edge=[], sink_extrude=[], sink_travel=[], into_lower_layer=[])
+        drag_moves = []
+        lift_moves = []
 
         def upd(d, v):
             d["min"] = v if d["min"] is None else min(d["min"], v)
@@ -187,7 +192,9 @@ def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
                     other = has & (bcol != col)
                     same = other & (blay == L)
                     depth = below - ct
-                    sk_mask = same & (depth > sink_tol)
+                    if same.any():
+                        stats["deepest"]["extrude"] = max(stats["deepest"]["extrude"], float(np.where(same, depth, -1e9).max()))
+                    sk_mask = same & (depth > sink_tol + EPS)
                     if sk_mask.any():
                         d = stats["sink_extrude"]
                         d["points"] += int(sk_mask.sum())
@@ -209,6 +216,21 @@ def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
                     chg = other & (blay == L - 1)
                     if chg.any():
                         th = ct - below
+                        hnom = plan.layer_z[L - 1] - (plan.layer_z[L - 2] if L >= 2 else 0.0)
+                        # nozzle below the other colour's top of an earlier layer (separate check)
+                        dl = np.where(chg, below - ct, -1e9)
+                        stats["deepest"]["extrude"] = max(stats["deepest"]["extrude"], float(dl.max()))
+                        lo = dl > sink_tol + EPS
+                        if lo.any():
+                            d = stats["into_lower_layer"]
+                            d["points"] += int(lo.sum())
+                            d["layers"].add(L)
+                            q = int(np.argmax(dl))
+                            d["max_depth"] = max(d["max_depth"], float(dl[q]))
+                            if len(items["into_lower_layer"]) < max_items:
+                                items["into_lower_layer"].append(self_item(plan, slot, t, L, xs[cs[q]], ys[cs[q]], depth=float(dl[q]),
+                                                                           below="colour %d (T%d), layer %d" % (3 - col, oth, int(blay[q])),
+                                                                           cells=int(lo.sum())))
                         edge = chg & masks[oth][ui, uj]
                         for name, msk in (("colour_change_edge", edge), ("colour_change_interior", chg & ~edge)):
                             if not msk.any():
@@ -217,11 +239,13 @@ def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
                             v = th[msk]
                             d["cells"] += int(msk.sum())
                             upd(d, float(v.min())); upd(d, float(v.max()))
-                            bad = msk & ((th < hmin - 1e-9) | (th > hmax + 1e-9))
+                            dev = np.abs(th - hnom)
+                            d["max_abs_deviation"] = max(d["max_abs_deviation"], float(dev[msk].max()))
+                            bad = msk & (dev > z_dev + EPS)
                             if bad.any():
                                 d["out_of_limits"] += int(bad.sum())
                                 d["layers"].add(L)
-                                q = int(np.argmax(np.where(bad, np.abs(th - 0.5 * (hmin + hmax)), -1)))
+                                q = int(np.argmax(np.where(bad, dev, -1)))
                                 if len(items[name]) < max_items:
                                     items[name].append(self_item(plan, slot, t, L, xs[cs[q]], ys[cs[q]], thickness=float(th[q]),
                                                                  below="colour %d (T%d), layer %d" % (3 - col, oth, int(blay[q])),
@@ -232,8 +256,7 @@ def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
                         upd(stats["same_colour"], float(v.min())); upd(stats["same_colour"], float(v.max()))
                 # travels / wipes at layer height
                 bz = src[t].blocks[L - 1].z
-                trav = [m for m in src[t].blocks[L - 1].moves()
-                        if m.kind in ("travel", "wipe") and abs(m.z - bz) < 1e-6 and abs(m.z0 - bz) < 1e-6]
+                trav = [m for m in src[t].blocks[L - 1].moves() if m.kind in ("travel", "wipe")]
                 if trav:
                     rk = r_key(nozzle_r)
                     if rk not in kernels:
@@ -242,7 +265,7 @@ def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
                     sh = shifts[t]
                     for m in trav:
                         xs_, ys_, _ = _samples([(m.x0, m.y0, m.x, m.y)], 0.05)
-                        tips = lat.tip(t, L, xs_, ys_)
+                        tips = lat.tip(t, L, xs_, ys_) + (m.z0 - bz) + ((m.z - m.z0) * np.linspace(0, 1, len(xs_)))
                         ci = np.rint((xs_ + sh[0] - bx0 + pad) / RES).astype(np.int32)
                         cj = np.rint((ys_ + sh[1] - by0 + pad) / RES).astype(np.int32)
                         ii = ci[:, None] + K[None, :, 0]
@@ -251,7 +274,17 @@ def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
                         oc = (topc[ii, jj] != col) & (tb > -1e8)
                         dep = np.where(oc, tb - tips[:, None], -1e9)
                         mx = float(dep.max())
-                        if mx > sink_tol:
+                        stats["deepest"]["travel"] = max(stats["deepest"]["travel"], mx)
+                        # raised-travel candidates: wider footprint (+0.1 mm) and no tolerance, so the
+                        # lift also covers raster differences against the independent verifier
+                        K2 = kernels.setdefault(r_key(nozzle_r + 0.1), _kernel(nozzle_r + 0.1))
+                        ii2, jj2 = ci[:, None] + K2[None, :, 0], cj[:, None] + K2[None, :, 1]
+                        tb2 = top[ii2, jj2]
+                        dep2 = float(np.where((topc[ii2, jj2] != col) & (tb2 > -1e8), tb2 - tips[:, None], -1e9).max())
+                        if dep2 > 0.0:
+                            lift_moves.append(dict(head=t, layer=L, slicer_line=m.line, kind=m.kind, depth=round(dep2, 4)))
+                        if mx > sink_tol + EPS:
+                            drag_moves.append(dict(head=t, layer=L, slicer_line=m.line, kind=m.kind, depth=round(mx, 4)))
                             d = stats["sink_travel"]
                             d["moves"] += 1
                             d["layers"].add(L)
@@ -267,15 +300,15 @@ def analyse_z(dual, plan, h_limits, sink_tol=0.03, max_items=40):
         for k, d in stats.items():
             if "layers" in d:
                 d["layers"] = _ranges(sorted(d["layers"]))
-        report["sides"][side] = dict(heads=["T%d" % h for h in heads], stats=stats, examples=items)
+        report["sides"][side] = dict(heads=["T%d" % h for h in heads], stats=stats, examples=items, drag_moves=drag_moves,
+                                     lift_moves=lift_moves)
         if stats["colour_change_interior"]["out_of_limits"] or stats["colour_change_edge"]["out_of_limits"]:
-            blocking.add("colour_change_thickness")
-        if stats["sink_extrude"]["points"]:
-            blocking.add("nozzle_sinks_into_other_colour")
+            blocking.add("z_deviation")
+        if stats["sink_extrude"]["points"] or stats["into_lower_layer"]["points"]:
+            blocking.add("nozzle_into_material")
         if stats["sink_travel"]["moves"]:
-            blocking.add("travel_through_other_colour")
+            blocking.add("travel_drag")
     report["blocking"] = sorted(blocking)
-    report["possible_boundary_thickness"] = plan.pair_z["boundary_thickness"]
     return report
 
 

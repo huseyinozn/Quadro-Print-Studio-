@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from .verify import Sim, PlaneCells, TOL, analyse
+from .dualtol import DUAL_LIMITS, EPS, within
 
 PAIR_PRIMARY = {0: 0, 1: 0, 2: 2, 3: 2}
 SIDE = {0: "left", 2: "left", 1: "right", 3: "right"}
@@ -50,11 +53,17 @@ def _model_segs(model, L):
     return [(m.x0, m.y0, m.x, m.y) for m in model.blocks[L - 1].moves() if m.kind == "extrude"]
 
 
+RRES = 0.1          # colour raster (mm)
+BED = (-5.0, 305.0)
+
+
 class DualSim(Sim):
     dual = True
-    # The two colour regions of one model touch: a head may descend next to the other
-    # colour's line of the SAME layer, which sits at the same height up to output rounding.
-    descend_margin = 0.002
+    # Coarse (1 mm cell) descent check: the two colours of a model touch, so a descent next to
+    # the other colour is judged with the same into-material limit as everything else; the
+    # exact check is the 0.1 mm colour raster below.
+    descend_margin = DUAL_LIMITS["into_material"]
+    allow_travel_lift = True
 
     def __init__(self, prof, models, label, tower_size=10.0, tower_speeds=(16.7, 100.0), **kw):
         kw.setdefault("heads", (0, 1, 2, 3))
@@ -69,10 +78,140 @@ class DualSim(Sim):
         self.deposits = {}           # (t, L) -> [segments] of model-region extrusion
         self.visit_states = []       # actual machine state at every visit start
         self.ext_events = []         # compressed sequence of (line, head, context)
+        self.travel_lifts = []       # z moves accepted as raised travel (line, head, layer, slicer line)
+        self.limits = dict(DUAL_LIMITS)
+        n = int((BED[1] - BED[0]) / RRES) + 2
+        self.r_top = np.full((n, n), -1e9, dtype=np.float32)
+        self.r_col = np.zeros((n, n), dtype=np.int8)
+        self.r_lay = np.zeros((n, n), dtype=np.int16)
+        self.rstats = dict(z_dev=dict(cells=0, over=0, max=0.0, where=None),
+                           into=dict(points=0, max=0.0, where=None, examples=[]),
+                           drag=dict(moves=0, max=0.0, where=None, examples=[]))
+        self._kern = {}
 
     # -------------------------------------------------------------- hooks
     def model_for(self, t):
         return self.models[PAIR_PRIMARY[t]]
+
+    def plane_key(self, t, v):
+        return ("model", SIDE[t], 1 if t in (0, 1) else 2)
+
+    # -------------------------------------------------------------- colour raster checks
+    def end_visit(self):
+        v = self.visit
+        if v is not None:
+            for t, recs in v["rec"].items():
+                if recs:
+                    self._raster(t, v["layer"], recs)
+        super().end_visit()
+
+    def _k(self, rc):
+        if rc not in self._kern:
+            self._kern[rc] = np.array([(i, j) for i in range(-rc, rc + 1) for j in range(-rc, rc + 1)
+                                       if math.hypot(i, j) <= rc + 1e-9], dtype=np.int32)
+        return self._kern[rc]
+
+    def _cells(self, x, y):
+        return (np.rint((x - BED[0]) / RRES).astype(np.int32), np.rint((y - BED[0]) / RRES).astype(np.int32))
+
+    def _raster(self, t, L, recs):
+        """Exact same-model checks against the OTHER colour (0.1 mm raster, physical tip heights):
+        into-material (extruding or descending), travel drag, and the Z deviation where one colour is
+        printed on the other. Limits: dualtol (shared with the planner)."""
+        col = 1 if t in (0, 1) else 2
+        lim = self.limits
+        mdl = self.models[0]
+        hnom = mdl.blocks[L - 1].height if 1 <= L <= mdl.layer_count else 0.2
+        af = math.pi * (self.prof.extruders[t].filament_diameter / 2.0) ** 2
+        ext = [r for r in recs if r[9] == "ext"]
+        mov = [r for r in recs if r[9] in ("travel", "wipe", "z")]
+        top, rc_, rl = self.r_top, self.r_col, self.r_lay
+        st = self.rstats
+        # travels / wipes / descents: nozzle opening (r 0.2 mm) vs the other colour's top
+        K = self._k(2)
+        for r in mov:
+            ln, x0, y0, x1, y1, z0, z1 = r[:7]
+            n = max(1, int(math.hypot(x1 - x0, y1 - y0) / RRES))
+            a = np.linspace(0.0, 1.0, n + 1)[1:]
+            xs, ys, zs = x0 + (x1 - x0) * a, y0 + (y1 - y0) * a, z0 + (z1 - z0) * a
+            ci, cj = self._cells(xs, ys)
+            ii, jj = ci[:, None] + K[None, :, 0], cj[:, None] + K[None, :, 1]
+            tb = top[ii, jj]
+            oth = (rc_[ii, jj] != col) & (tb > -1e8)
+            dep = float(np.where(oth, tb - zs[:, None], -1e9).max())
+            mkey = "into_seen" if r[9] == "z" else "drag_seen"
+            st[mkey] = max(st.get(mkey, 0.0), dep)
+            if dep > lim["into_material"] + EPS:
+                key = "into" if r[9] == "z" else "drag"
+                d = st[key]
+                d["points" if key == "into" else "moves"] += 1
+                if dep > d["max"]:
+                    d["max"], d["where"] = dep, dict(line=ln, head="T%d" % t, layer=L, kind=r[9])
+                if len(d["examples"]) < 20:
+                    d["examples"].append(dict(line=ln, head="T%d" % t, layer=L, kind=r[9], depth=round(dep, 4)))
+                self.issue("error", "DUAL_TRAVEL_DRAG" if key == "drag" else "DUAL_INTO_MATERIAL",
+                           "T%d %s %.3f mm below the other colour's material (allowed %.2f)" % (t, r[9], dep, lim["into_material"]), ln)
+        if not ext:
+            return
+        xs_l, ys_l, zs_l, rr_l, ln_l = [], [], [], [], []
+        for r in ext:
+            ln, x0, y0, x1, y1, z0, z1, e = r[:8]
+            seg = math.hypot(x1 - x0, y1 - y0)
+            w = e * af / max(seg, 1e-9) / hnom + hnom * (1 - math.pi / 4)
+            rc = int(min(4, max(1, round(w / 2.0 / RRES))))
+            n = max(1, int(seg / RRES))
+            a = np.linspace(0.0, 1.0, n + 1)
+            xs_l.append(x0 + (x1 - x0) * a); ys_l.append(y0 + (y1 - y0) * a); zs_l.append(z0 + (z1 - z0) * a)
+            rr_l.append(np.full(n + 1, rc, dtype=np.int32)); ln_l.append(np.full(n + 1, ln, dtype=np.int64))
+        xs, ys, zs, rr, lns = (np.concatenate(v) for v in (xs_l, ys_l, zs_l, rr_l, ln_l))
+        ci, cj = self._cells(xs, ys)
+        I, J, Z, LN = [], [], [], []
+        for rc in np.unique(rr):
+            K = self._k(int(rc))
+            sel = rr == rc
+            I.append((ci[sel][:, None] + K[None, :, 0]).ravel()); J.append((cj[sel][:, None] + K[None, :, 1]).ravel())
+            Z.append(np.repeat(zs[sel], len(K))); LN.append(np.repeat(lns[sel], len(K)))
+        I, J, Z, LN = (np.concatenate(v) for v in (I, J, Z, LN))
+        n_ = top.shape[1]
+        lin = I.astype(np.int64) * n_ + J
+        order = np.lexsort((Z, lin))
+        lin, Z, LN = lin[order], Z[order], LN[order]
+        first = np.ones(len(lin), dtype=bool)
+        first[1:] = lin[1:] != lin[:-1]
+        lin, Z, LN = lin[first], Z[first], LN[first]
+        ui, uj = lin // n_, lin % n_
+        below, bc, bl = top[ui, uj], rc_[ui, uj], rl[ui, uj]
+        oth = (below > -1e8) & (bc != col)
+        dep = np.where(oth, below - Z, -1e9)
+        if oth.any():
+            st["into_seen"] = max(st.get("into_seen", 0.0), float(dep.max()))
+        bad = dep > lim["into_material"] + EPS
+        if bad.any():
+            q = int(np.argmax(dep))
+            d = st["into"]
+            d["points"] += int(bad.sum())
+            if dep[q] > d["max"]:
+                d["max"], d["where"] = float(dep[q]), dict(line=int(LN[q]), head="T%d" % t, layer=L, kind="extrude")
+            if len(d["examples"]) < 20:
+                d["examples"].append(dict(line=int(LN[q]), head="T%d" % t, layer=L, kind="extrude", depth=round(float(dep[q]), 4)))
+            self.issue("error", "DUAL_INTO_MATERIAL", "T%d layer %d prints %.3f mm below the other colour's material (allowed %.2f)"
+                       % (t, L, float(dep[q]), lim["into_material"]), int(LN[q]))
+        chg = oth & (bl == L - 1)
+        if chg.any():
+            dv = np.abs((Z - below) - hnom)
+            d = st["z_dev"]
+            d["cells"] += int(chg.sum())
+            q = int(np.argmax(np.where(chg, dv, -1)))
+            if dv[q] > d["max"]:
+                d["max"], d["where"] = float(dv[q]), dict(line=int(LN[q]), head="T%d" % t, layer=L)
+            over = chg & (dv > lim["z_deviation"] + EPS)
+            if over.any():
+                d["over"] += int(over.sum())
+                self.issue("error", "DUAL_Z_DEVIATION", "T%d layer %d: %.3f mm off the nominal layer height where it is printed on "
+                           "the other colour (allowed %.2f)" % (t, L, float(dv[q]), lim["z_deviation"]), int(LN[q]))
+        top[ui, uj] = Z
+        rc_[ui, uj] = col
+        rl[ui, uj] = L
 
     def owner_key(self, t, v):
         return ("model", SIDE[t])
@@ -165,7 +304,8 @@ class DualSim(Sim):
         return None
 
 
-def analyse_dual(sim: DualSim, registration_limit=0.10, min_gap=2.0, region_tol=0.005):
+def analyse_dual(sim: DualSim, registration_limit=None, min_gap=2.0, region_tol=0.005):
+    registration_limit = DUAL_LIMITS["y_registration"] if registration_limit is None else registration_limit
     res = analyse(sim, expected_count=4, min_gap=min_gap)
     models = sim.models
     nL = models[0].layer_count
@@ -193,7 +333,7 @@ def analyse_dual(sim: DualSim, registration_limit=0.10, min_gap=2.0, region_tol=
         if a in shift and b in shift:
             r = math.hypot(shift[b][0] - shift[a][0], shift[b][1] - shift[a][1])
             reg[side] = round(r, 4)
-            if r > registration_limit + 1e-9:
+            if not within(r, registration_limit):
                 err("DUAL_REGISTRATION", "%s model: colour 2 (T%d) is %.3f mm off colour 1 (T%d) (allowed %.3f)"
                     % (side, b, r, a, registration_limit))
     res["dual_registration_mm"] = reg
@@ -355,6 +495,17 @@ def analyse_dual(sim: DualSim, registration_limit=0.10, min_gap=2.0, region_tol=
         err("CARRIAGE_DETOUR", "%d idle-head moves towards the printing heads (first: %s %.3f -> %.3f at line %d while %s print)"
             % (len(toward), d0["head"], d0["start"], d0["target"], d0["line"], d0["printing_next"]))
 
+    rs = sim.rstats
+    res["dual_limits"] = dict(sim.limits)
+    res["dual_z_deviation"] = dict(cells_checked=rs["z_dev"]["cells"], over_limit=rs["z_dev"]["over"],
+                                   max_mm=round(rs["z_dev"]["max"], 4), where=rs["z_dev"]["where"])
+    res["dual_into_material"] = dict(points=rs["into"]["points"], max_mm=round(rs["into"]["max"], 4), where=rs["into"]["where"],
+                                     deepest_seen_mm=round(rs.get("into_seen", 0.0), 4),
+                                     examples=rs["into"]["examples"])
+    res["dual_travel_drag"] = dict(moves=rs["drag"]["moves"], max_mm=round(rs["drag"]["max"], 4), where=rs["drag"]["where"],
+                                   deepest_seen_mm=round(rs.get("drag_seen", 0.0), 4),
+                                   examples=rs["drag"]["examples"])
+    res["raised_travel_z_moves"] = len(sim.travel_lifts)
     errc = sum(c for code, c in sim.issue_counts.items() if any(i["code"] == code and i["severity"] == "error" for i in sim.issues))
     res["issues"] = sim.issues
     res["issue_counts"] = sim.issue_counts
@@ -364,7 +515,7 @@ def analyse_dual(sim: DualSim, registration_limit=0.10, min_gap=2.0, region_tol=
     return res
 
 
-def verify_dual(prof, models, gcode_path, foundation_layers=3, label="candidate", registration_limit=0.10):
+def verify_dual(prof, models, gcode_path, foundation_layers=3, label="candidate", registration_limit=None):
     nozzle = prof.extruders[0].nozzle_diameter
     sim = DualSim(prof, models, label, h_limits=(0.2 * nozzle, 0.75 * nozzle)).run(gcode_path, foundation_layers)
     return analyse_dual(sim, registration_limit=registration_limit), sim

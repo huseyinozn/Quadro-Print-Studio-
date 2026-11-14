@@ -43,6 +43,7 @@ const crypto = require("crypto");
   r.diff_marks = await page.$$eval("#bed rect[data-diff]", ps => ps.length);
   r.legend = await page.textContent("#legend");
   r.reject_visible = await page.isVisible("#reject-card");
+  r.checks = await page.$$eval("#mapping [data-check]", ls => ls.map(l => l.innerText.replace(/\s+/g, " ").trim().slice(0, 160)));
   r.generate_visible = await page.isVisible("#generate");
   await page.screenshot({ path: path.join(outDir, "02_layout.png"), fullPage: true });
   await page.locator("#layout-card").screenshot({ path: path.join(outDir, "03_layout_card.png") });

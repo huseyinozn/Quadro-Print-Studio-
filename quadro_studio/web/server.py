@@ -449,7 +449,9 @@ def dual_layout_json(dual, prof, plan):
                           for p in plan.mesh_deviating_points],
         mesh_effects=effects, mesh_affected=sorted(effects),
         offsets={"T%d" % t: list(plan.offsets[t]) for t in range(4)},
-        checks=[dict(name=c["name"], ok=c["ok"], detail=c["detail"]) for c in plan.checks],
+        checks=[dict(name=c["name"], ok=c["ok"], detail=c["detail"], **({"value": c["value"]} if "value" in c else {}),
+                     **({"limit": c["limit"]} if "limit" in c else {})) for c in plan.checks],
+        z_split=getattr(plan, "z_split", None), z_splits=getattr(plan, "z_splits", None),
     )
 
 

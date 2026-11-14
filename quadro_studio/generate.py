@@ -67,6 +67,8 @@ class FarmGenerator:
         self.input_sha = input_sha256
         self.profile_fp = profile_fp
         self.counts = dict(part_visits=0, moves=0, pieces=0)
+        self._pending_lower = None
+        self._lowered_to = None
         self.pos = [None, None, None]
         self.marks = {}                                # named line indices (kept valid across inserts)
         self.preheats = []                             # report of placed preheat commands
@@ -213,6 +215,10 @@ class FarmGenerator:
                 continue
             m: Move = it
             self.counts["moves"] += 1
+            if m.kind not in ("travel", "wipe") and getattr(self, "_pending_lower", None) is not None:
+                self.g1(z=self._pending_lower, f=self._pending_lower_f)
+                self._pending_lower = None
+                self._lowered_to = None
             if m.kind in ("retract", "deretract"):
                 self.g1(e=m.e, f=m.f)
                 for t in tools:
@@ -226,6 +232,19 @@ class FarmGenerator:
                 continue
             fr = self.breakpoints(L, t_ref, slot, m, b.z)
             n = len(fr) - 1
+            # Dual: raised travel for slice travels/wipes that would pass through the other colour
+            lift = 0.0
+            tl = getattr(plan, "travel_lift", None)
+            if tl and m.kind in ("travel", "wipe") and hasattr(plan, "pair_of"):
+                lift = tl.get((L, plan.pair_of(tools), m.line), 0.0)
+            if lift:
+                if self._lowered_to is None:            # not raised yet (consecutive raised moves stay up)
+                    self.g1(z=self._zs[0] + (m.z0 - b.z) + lift, f=m.f)
+                self.counts["raised_travels"] = self.counts.get("raised_travels", 0) + 1
+            elif getattr(self, "_pending_lower", None) is not None:
+                self.g1(z=self._pending_lower, f=self._pending_lower_f)
+                self._pending_lower = None
+                self._lowered_to = None
             for k in range(1, n + 1):
                 a0, a1 = fr[k - 1], fr[k]
                 ex, ey = m.x0 + (m.x - m.x0) * a1, m.y0 + (m.y - m.y0) * a1
@@ -248,8 +267,15 @@ class FarmGenerator:
                     e = m.e * (a1 - a0)
                     for t in tools:
                         self.level[t] -= e
-                self.g1(x=X, y=Y, z=Z, e=e, f=m.f)
+                self.g1(x=X, y=Y, z=Z + lift, e=e, f=m.f)
                 self.counts["pieces"] += 1
+            if lift:
+                self._pending_lower, self._pending_lower_f = self._zs[n] + (m.z - b.z), m.f
+                self._lowered_to = "up"
+        if getattr(self, "_pending_lower", None) is not None:
+            self.g1(z=self._pending_lower, f=self._pending_lower_f)
+            self._pending_lower = None
+        self._lowered_to = None
         for t in tools:
             if abs(self.level[t] - self.retract_len) < 5e-5:
                 self.level[t] = self.retract_len

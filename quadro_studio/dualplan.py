@@ -46,7 +46,10 @@ class DualOptions:
     tower_wall_speed: float = 16.7      # mm/s
     tower_infill_speed: float = 100.0   # mm/s
     tower_gap: float = 6.0              # tower to model / tower to tower (mm)
-    registration_limit: float = 0.10    # mm, max XY offset between the two colours of one model
+    registration_limit: float = 0.30    # mm, max Y offset between the two colours of one model (dualtol)
+    z_deviation_limit: float = 0.30     # mm, max |local thickness - nominal| where colours stack (dualtol)
+    travel_lift_clearance: float = 0.05 # mm, raised travel ends this far above the other colour's top
+    z_split: str = "auto"               # auto | symmetric | least_into_material (pair-B height choice)
     h_min_ratio: float = 0.2
     h_max_ratio: float = 0.75
     standby_temp: float | None = None   # default: print temp + slice standby_temperature_delta
@@ -67,7 +70,7 @@ class DualOptions:
     lift_feed: float = 1000.0
     descend_feed: float = 600.0
     outlier_threshold: float = 0.25
-    sink_tolerance: float = 0.03        # mm, nozzle below other material (same as verifier inpart_sink)
+    sink_tolerance: float = 0.03        # mm, nozzle below the other colour's material (dualtol into_material)
     preset: str = "auto"
 
 
@@ -200,8 +203,33 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
     # ---- pair consistency (the reason a profile may be refused) ---------------------------
     a_z, b_z = offs[2][2] - offs[0][2], offs[3][2] - offs[1][2]
     e_z = a_z - b_z
-    plan.dstar = 0.5 * (a_z + b_z)
     r_z = abs(e_z) / 2.0
+    hL = m0.blocks[1].height if len(m0.blocks) > 1 else m0.blocks[0].z
+
+    # Shared Z per pair: dstar = Z_B - Z_A. Colour 2 sits delta = dstar - a_z (left) and dstar - b_z
+    # (right) above colour 1. Colour 2 prints after colour 1 in every layer, so a nozzle ends up
+    # below the other colour by max(0, -delta) (colour 2 beside a higher colour 1) or delta - h
+    # (colour 1 of the next layer on a higher colour 2). Two splits are evaluated:
+    def into_depth(dl):
+        return max(0.0, -dl, dl - hL)
+    sym = 0.5 * (a_z + b_z)
+    lo_, hi_ = min(a_z, b_z) - hL, max(a_z, b_z) + hL
+    best = None
+    n = 4000
+    for i in range(n + 1):
+        d = lo_ + (hi_ - lo_) * i / n
+        key = (round(max(into_depth(d - a_z), into_depth(d - b_z)), 9), max(abs(d - a_z), abs(d - b_z)))
+        if best is None or key < best[0]:
+            best = (key, d)
+    least = best[1]
+    plan.z_splits = {
+        "symmetric": dict(dstar=round(sym, 5), left_delta=round(sym - a_z, 5), right_delta=round(sym - b_z, 5),
+                          max_into_material=round(max(into_depth(sym - a_z), into_depth(sym - b_z)), 5)),
+        "least_into_material": dict(dstar=round(least, 5), left_delta=round(least - a_z, 5), right_delta=round(least - b_z, 5),
+                                    max_into_material=round(max(into_depth(least - a_z), into_depth(least - b_z)), 5)),
+    }
+    plan.z_split = "symmetric"
+    plan.dstar = sym
     h = m0.blocks[1].height if len(m0.blocks) > 1 else m0.blocks[0].z
     hmin, hmax = o["h_min_ratio"] * nozzle, o["h_max_ratio"] * nozzle
     plan.pair_z = dict(T2_minus_T0=round(a_z, 5), T3_minus_T1=round(b_z, 5), mismatch=round(e_z, 5), residual=round(r_z, 5),
@@ -219,10 +247,11 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
     plan.y_shift = {"A": 0.0, "B": -0.5 * k}
     plan.pair_y = dict(T2_minus_T0=round(a_y, 5), T3_minus_T1=round(b_y, 5), mismatch=round(k, 5), registration_error=round(r_y, 5),
                        limit=o["registration_limit"])
-    check("pair_y_registration", r_y <= o["registration_limit"] + 1e-9,
+    from .dualtol import within
+    check("pair_y_registration", within(r_y, o["registration_limit"]),
           "Y offsets: T2-T0 = %+.4f mm but T3-T1 = %+.4f mm (difference %.4f mm). Both pairs share Y, so the two colours of each model "
-          "would be shifted %.3f mm against each other (allowed %.3f mm). This is separate from Z: matching the heights "
-          "does not remove it." % (a_y, b_y, abs(k), r_y, o["registration_limit"]))
+          "are shifted %.3f mm against each other (allowed %.3f mm absolute). Separate from Z."
+          % (a_y, b_y, abs(k), r_y, o["registration_limit"]), value=round(r_y, 5), limit=o["registration_limit"])
 
     # ---- placement -----------------------------------------------------------------------------
     fx0, fy0, fx1, fy1 = [min(a, b) for a, b in zip(m0.bbox_extrude[:2], m2.bbox_extrude[:2])] + \
@@ -315,6 +344,73 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
     check("pair_parks", home[2] - hiA >= c and loB - home[1] >= c,
           "pair A keeps %.1f mm to parked T2, pair B keeps %.1f mm to parked T1" % (home[2] - hiA, loB - home[1]))
 
+    # ---- Z: deviation limit (owner: 0.30 mm) and the SEPARATE into-material / travel checks -------
+    from .dualz import analyse_z
+    from .dualtol import within
+    zl, sk = o["z_deviation_limit"], o["sink_tolerance"]
+    plan.travel_lift = {}
+    plan.z_analysis = plan.z_analysis_symmetric = None
+    if r_z > 1e-6:
+        za = analyse_z(dual, plan, sink_tol=sk, z_dev=zl)
+        plan.z_analysis_symmetric = za
+        alt = plan.z_splits["least_into_material"]
+        want = o["z_split"]
+        if want == "least_into_material" or (want == "auto" and (
+                "nozzle_into_material" in za["blocking"] or "travel_drag" in za["blocking"]) and alt["max_into_material"] <= sk + 1e-9
+                and within(alt["left_delta"], zl) and within(alt["right_delta"], zl)):
+            # fix evaluated and applied: choose the pair-B height that keeps every nozzle out of the
+            # other colour (offsets and mesh unchanged); re-check the real geometry with it
+            plan.dstar, plan.z_split = least, "least_into_material"
+            za = analyse_z(dual, plan, sink_tol=sk, z_dev=zl)
+        plan.z_analysis = za
+    sp = plan.z_splits[plan.z_split]
+    devs = {side: max(v["stats"]["colour_change_interior"]["max_abs_deviation"], v["stats"]["colour_change_edge"]["max_abs_deviation"])
+            for side, v in (plan.z_analysis or {"sides": {}})["sides"].items()}
+    plan.pair_z.update(split=plan.z_split, dstar=round(plan.dstar, 5), left_delta=sp["left_delta"], right_delta=sp["right_delta"],
+                       measured_max_deviation=({k: round(v, 4) for k, v in devs.items()} if devs else None), limit=zl)
+    zbad = plan.z_analysis is not None and "z_deviation" in plan.z_analysis["blocking"]
+    check("pair_z_consistency", not zbad and within(sp["left_delta"], zl) and within(sp["right_delta"], zl),
+          "Z offsets: T2-T0 = %+.4f mm, T3-T1 = %+.4f mm. With one shared Z per pair colour 2 sits %+.4f mm (left) and %+.4f mm "
+          "(right) against colour 1 (%s split). Where one colour is printed on the other the layer is up to %s mm off its "
+          "nominal height (allowed %.2f mm absolute)." % (
+              a_z, b_z, sp["left_delta"], sp["right_delta"], plan.z_split.replace("_", " "),
+              "/".join("%.3f" % v for v in devs.values()) if devs else "0.000", zl),
+          value=round(max([abs(sp["left_delta"]), abs(sp["right_delta"])] + list(devs.values())), 5), limit=zl)
+    # nozzle into the other colour's material (extruding / descending): separate, never relaxed
+    if plan.z_analysis:
+        pts = {side: v["stats"]["sink_extrude"]["points"] + v["stats"]["into_lower_layer"]["points"] for side, v in plan.z_analysis["sides"].items()}
+        mx = max(v["stats"]["deepest"]["extrude"] for v in plan.z_analysis["sides"].values())
+    else:
+        pts, mx = {}, 0.0
+    alt_txt = ""
+    if plan.z_analysis_symmetric is not None and plan.z_split != "symmetric":
+        s0 = plan.z_analysis_symmetric["sides"]
+        alt_txt = (" Fix applied: the symmetric split (colour 2 %+.3f / %+.3f mm) put the nozzle up to %.3f mm into colour 1 at %d "
+                   "points and dragged %d travels through it; pair B is printed %+.4f mm higher instead (offsets and mesh unchanged)."
+                   % (plan.z_splits["symmetric"]["left_delta"], plan.z_splits["symmetric"]["right_delta"],
+                      max(max(v["stats"]["sink_extrude"]["max_depth"], v["stats"]["into_lower_layer"]["max_depth"]) for v in s0.values()),
+                      sum(v["stats"]["sink_extrude"]["points"] + v["stats"]["into_lower_layer"]["points"] for v in s0.values()),
+                      sum(v["stats"]["sink_travel"]["moves"] for v in s0.values()), plan.dstar - plan.z_splits["symmetric"]["dstar"]))
+    check("into_material", not any(pts.values()),
+          "Nozzle into the other colour while printing: %s points (deepest %.3f mm; allowed %.2f mm).%s"
+          % (", ".join("%s %d" % kv for kv in pts.items()) or "0", mx, sk, alt_txt), value=round(mx, 5), limit=sk)
+    # travels / wipes through the other colour: raised travel where the slice path would drag
+    drags = [dict(dm, side=side) for side, v in (plan.z_analysis or {"sides": {}})["sides"].items() for dm in v["drag_moves"]]
+    lifts = [dm for v in (plan.z_analysis or {"sides": {}})["sides"].values() for dm in v["lift_moves"]] if drags else []
+    for dm in lifts:
+        key = (dm["layer"], PAIR_OF[dm["head"]], dm["slicer_line"])
+        plan.travel_lift[key] = max(plan.travel_lift.get(key, 0.0), round(dm["depth"] + o["travel_lift_clearance"], 4))
+    plan.travel_lift_report = dict(moves=len(plan.travel_lift), max_lift=max(plan.travel_lift.values(), default=0.0),
+                                   examples=drags[:20])
+    tmx = max((v["stats"]["deepest"]["travel"] for v in (plan.z_analysis or {"sides": {}})["sides"].values()), default=0.0)
+    check("travel_drag", True,
+          ("No travel or wipe passes through the other colour." if not drags else
+           "%d travel/wipe moves would pass up to %.3f mm through the other colour; they are raised by up to %.3f mm "
+           "(raised travel, %.2f mm above it)." % (len(plan.travel_lift), max(d["depth"] for d in drags),
+                                                    plan.travel_lift_report["max_lift"], o["travel_lift_clearance"]))
+          + (" Deepest travel/wipe below the other colour: %.3f mm (allowed %.2f)." % (max(tmx, 0.0), sk)),
+          value=round(max(tmx, 0.0), 5) if not drags else 0.0, limit=sk)
+
     # ---- foundation thickness over every head's region and tower -----------------------------------
     glob = [1e9, -1e9]
     for t in range(4):
@@ -348,29 +444,6 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
                 plan.affected_by_outliers.append(dict(point=[ol["x"], ol["y"]], point_z=ol["z"], deviation=ol["deviation"],
                                                       copy="T%d/slot0" % t, tool=t, slot=0, first_layer_dz_max=round(d1, 4),
                                                       foundation_top_dz_max=round(dF, 4), effect="calculated effect"))
-    # ---- Z residual: does it actually matter in THIS model? (replayed over the real geometry) -------
-    if r_z > 1e-6:
-        from .dualz import analyse_z
-        za = analyse_z(dual, plan, (hmin, hmax), sink_tol=o["sink_tolerance"])
-        plan.z_analysis = za
-        parts = []
-        for side, v in za["sides"].items():
-            st = v["stats"]
-            ci, ce = st["colour_change_interior"], st["colour_change_edge"]
-            parts.append("%s model: colour changes %d cells out of limits (layers %s)%s; nozzle sinks into the other colour at %d "
-                         "points (max %.3f mm); %d travels drag through it" % (
-                             side, ci["out_of_limits"] + ce["out_of_limits"], ", ".join((ci["layers"] + ce["layers"])[:6]) or "-",
-                             (", e.g. layer %d %s at (%.2f, %.2f): %.3f mm on %s" % (
-                                 v["examples"]["colour_change_interior"][0]["layer"], v["examples"]["colour_change_interior"][0]["head"],
-                                 v["examples"]["colour_change_interior"][0]["x"], v["examples"]["colour_change_interior"][0]["y"],
-                                 v["examples"]["colour_change_interior"][0]["thickness"], v["examples"]["colour_change_interior"][0]["below"])
-                              if v["examples"]["colour_change_interior"] else ""),
-                             st["sink_extrude"]["points"], st["sink_extrude"]["max_depth"], st["sink_travel"]["moves"]))
-        check("pair_z_consistency", not za["blocking"],
-              plan._z_text + " In this model: " + "; ".join(parts) + ".")
-    else:
-        check("pair_z_consistency", True, plan._z_text + " No residual.")
-
     plan.validated_scope = "Dual Color Copy Mode: software checks only, no physical print evidence for this file"
     plan.sync_pitch = spacing
     plan.profile_summary = prof.summary()
