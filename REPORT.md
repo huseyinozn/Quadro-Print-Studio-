@@ -1,18 +1,19 @@
-# Farm Mode milestone 1 — review report
+# Farm Mode milestone 1 — review report v2 (after review 02)
 
 **Status: CANDIDATE.** The 40-shark file was generated from the slice and the printer profile only, then checked by an independent simulator. All software checks pass (0 errors). It is **not validated on hardware** and two physical uncertainties need a decision before any print (section 6).
 
 | | |
 |---|---|
-| Candidate | `candidate/CANDIDATE_farm40_shark_software-verified_NOT-hardware-validated.gcode` (1054084 lines, sha256 `1794069f8bc11e5c…`) |
+| Candidate | `candidate/CANDIDATE_v2_farm40_shark_software-verified_NOT-hardware-validated.gcode` (1054084 lines, sha256 `9e113ffdfba15c8c…`) |
 | Copies | 40 found, 40 complete over all 83 layers, 10 COPY groups |
-| Generation | 21.6 s, inputs opened: `candidate/CANDIDATE_farm40_shark_software-verified_NOT-hardware-validated.gcode.partial`, `gen_inputs/profile.zip`, `gen_inputs/single_shark.gcode`, `results/generate.json`; oracle opened: **False**; rerun byte-identical: **True** |
-| Verification | 108.6 s (candidate + oracle simulation + comparison) |
-| Tests | QUADRO_FIXTURES=<fixtures> python3 -m unittest discover -s tests -v — Ran 39 tests in 14.460s OK |
+| Generation | 21.6 s, inputs opened: `candidate/CANDIDATE_v2_farm40_shark_software-verified_NOT-hardware-validated.gcode.partial`, `gen_inputs/profile.zip`, `gen_inputs/single_shark.gcode`, `results/generate.json`; oracle opened: **False**; rerun byte-identical: **True** |
+| Verification | 118.5 s (candidate + oracle simulation + comparison) |
+| Tests | QUADRO_FIXTURES=<fixtures> python3 -m unittest discover -s tests -v — Ran 70 tests in 17.521s OK |
 | Negative cases | 10/10 refused with the expected diagnostic and no G-code written |
+| Verifier mutation cases (real candidate) | 4/4 rejected with the expected diagnostic |
 | Regeneration cases | 3/3 generated and independently verified |
 | Motion-only time estimate | 2.00 h (no accel, no heat-up; rough) |
-| Whole acceptance run | 298 s |
+| Whole acceptance run | 559 s |
 
 ## 1. Reconstructed model (from the profile and measured data)
 
@@ -43,7 +44,7 @@
 | Foundation order | heads [0, 1, 2, 3], layer-major, serpentine slots | independent |
 | First print after each purge | T0 0.200 mm above bed, T1 0.200 mm above bed, T2 0.200 mm above bed, T3 0.200 mm above bed | primed, heated |
 | First print after COPY entry | all 4 heads primed (retract level [0.0]), heated | |
-| Final state | heaters off True, fans off True, carriages home True, T0 PRIMARY/others INACTIVE True, extruders unsynced True, mesh `loaded:default` | |
+| Final state | heaters off True, fans off True, carriages parked at endstop positions True, T0 PRIMARY/others INACTIVE True, extruders unsynced True, mesh `loaded:default` | |
 
 ## 3. Comparison with the reviewed 40-shark oracle (after generation, verify stage only)
 
@@ -52,9 +53,37 @@ Same simulator, same slicer alignment. 3136640 aligned moves compared.
 * Placements: 40/40 matched, max difference **0.0000 mm**. Visit order per head identical: **True**. Feedrate mismatches: 0.
 * Z at every aligned slicer endpoint: max |Δ| **0.00037 mm** (tolerance 0.001), worst at head T0 layer 18 slicer line 32076.
 * E in layer 1 and layers ≥6: identical within 2.6e-05 (rounding).
-* **Open finding — foundation E (layers 2–5).** No tolerance is applied to this difference: the oracle's foundation E rule could not be recovered, so neither file is accepted as the reference for it. Per head, candidate/oracle − 1: T0 -1.22 %..+3.79 % (2651 of 41800 moves >1 %, 857 >2 %); T1 -1.73 %..+4.47 % (2707 of 41800 moves >1 %, 484 >2 %); T2 -1.37 %..+3.60 % (1956 of 41800 moves >1 %, 371 >2 %); T3 -3.67 %..+3.82 % (4436 of 41800 moves >1 %, 1338 >2 %).
-  * Largest difference: head **T1**, layer **3**, slicer line **4384** (Internal solid infill, width 0.420 mm, slicer E 0.22450 mm): oracle **0.160697 mm**, candidate **0.167885 mm** (candidate − oracle +0.007188 mm, +4.47 %). Commanded nozzle Z there: candidate 0.20022, oracle 0.20022.
-  * Same Z in both files, so the difference is only the E rule. The candidate follows A(h,w)/A(0.2,w) at the local thickness (independently re-measured: max 0.66 %, tolerance 1.7 % derived from the thickness estimator). The oracle deviates from that rule by up to 4.20 %. Cause **not verified — open finding**. Rules tested on the largest-difference move without reproducing the oracle value: flow-area or linear thickness ratio at piece midpoints, at piece end points or start points, and the surface of another head. The oracle's implied linear thickness there is 0.1432 mm while both files command the same Z.
+
+### 3a. Foundation E — historical rule verified (parity question, not a production rule)
+
+Re-computed here from the supplied old mesh (141253) and old generated commands, without using them in generation: 190520 positive deposition pieces on layers 2–5 of the four heads aligned (XY mismatches: 0). For each piece at its end point `E_printed = round(E_old × h_new / h_old, 8)` reproduces the printed reference exactly for 190519 pieces and within one unit of the 8th decimal for 1 (max |Δ| 1.0e-08 mm; the remaining unit comes from evaluating h in double precision). Old E itself is reproduced by slicer E apportioned over ≤ 4 mm pieces × A(h_old,w)/A(0.2,w) at the piece end point within 3.7e-05 mm (0.047 %). With the remesh ratio this two-step rule gives **0.1606971 mm** for T1 slot 8 layer 3 line 4384 (printed 0.160697).
+
+So the printed file is the *flow-area rule at the old mesh, linearly rescaled to the new mesh*. The candidate applies the flow-area rule directly at the current mesh. That is the production method (a user supplies one current profile; the remesh needs a previous file and mesh). The parity difference is therefore explained: head **T1**, layer **3**, slicer line **4384**: oracle 0.160697 mm, candidate 0.167885 mm (+0.007188 mm, +4.47 %); per head the candidate/oracle ratio − 1 is T0 -1.22..+3.79 %; T1 -1.73..+4.47 %; T2 -1.37..+3.60 %; T3 -3.67..+3.82 %.
+
+### 3b. Foundation E — candidate versus the direct specification (independent of parity)
+
+Spec: E = slicer E × piece share × A(h,w)/A(0.2,w), with h re-measured by the verifier from the output itself (plane fit of the previous layer of the same copy). Tolerance per move 1.7 % (derived from the thickness estimator, not from the oracle).
+
+| Layer/head | moves checked | E actual (mm) | E spec (mm) | signed error (mm) | abs error (mm) | max rel | min rel |
+|---|---|---|---|---|---|---|---|
+| L2/T0 | 7342 | 170.0990 | 170.0979 | +0.00106 | 0.01766 | +0.273 % | -0.148 % |
+| L2/T1 | 7220 | 119.5164 | 119.5178 | -0.00145 | 0.01502 | +0.409 % | -0.143 % |
+| L2/T2 | 7410 | 123.9089 | 123.9079 | +0.00094 | 0.01406 | +0.374 % | -0.261 % |
+| L2/T3 | 7354 | 148.8363 | 148.8362 | +0.00011 | 0.02538 | +0.458 % | -0.478 % |
+| L3/T0 | 8005 | 147.1596 | 147.1594 | +0.00012 | 0.00959 | +0.217 % | -0.105 % |
+| L3/T1 | 8061 | 127.4043 | 127.4000 | +0.00439 | 0.01719 | +0.231 % | -0.187 % |
+| L3/T2 | 8080 | 113.2315 | 113.2309 | +0.00062 | 0.01068 | +0.255 % | -0.262 % |
+| L3/T3 | 8099 | 147.3823 | 147.3805 | +0.00172 | 0.03377 | +0.583 % | -0.317 % |
+| L4/T0 | 7936 | 149.2027 | 149.2030 | -0.00026 | 0.00955 | +0.237 % | -0.212 % |
+| L4/T1 | 7941 | 108.3863 | 108.3869 | -0.00055 | 0.00930 | +0.254 % | -0.271 % |
+| L4/T2 | 7915 | 112.0673 | 112.0676 | -0.00032 | 0.00985 | +0.292 % | -0.218 % |
+| L4/T3 | 7888 | 131.5081 | 131.5086 | -0.00047 | 0.01289 | +0.377 % | -0.665 % |
+| L5/T0 | 8013 | 138.1638 | 138.1647 | -0.00084 | 0.00836 | +0.310 % | -0.418 % |
+| L5/T1 | 7976 | 102.8184 | 102.8194 | -0.00099 | 0.00911 | +0.426 % | -0.543 % |
+| L5/T2 | 8085 | 104.1186 | 104.1197 | -0.00112 | 0.00871 | +0.352 % | -0.583 % |
+| L5/T3 | 7984 | 123.0684 | 123.0688 | -0.00046 | 0.01003 | +0.328 % | -0.375 % |
+
+For comparison, the oracle measured against the same direct spec: max 4.20 % (3565 moves above 1.7 %) — expected, because it follows the historical remesh rule (3a).
 
 Intentional differences (candidate vs oracle):
 
@@ -66,35 +95,46 @@ Intentional differences (candidate vs oracle):
 
 ## 4. Transitions and parking
 
-| Line | Phase | T0 | T1 | T2 | T3 | Z |
-|---|---|---|---|---|---|---|
-| 25 | home | -169.00 | -112.75 | 412.75 | 469.00 | 8.00 |
-| 45 | arrange T0 | 10.00 | 356.50 | 412.75 | 469.00 | 8.00 |
-| 66728 | home after T0 | -169.00 | -112.75 | 412.75 | 469.00 | 6.20 |
-| 66737 | arrange T1 | -169.00 | 190.06 | 412.75 | 469.00 | 8.00 |
-| 133376 | home after T1 | -169.00 | -112.75 | 412.75 | 469.00 | 6.20 |
-| 133385 | arrange T2 | -169.00 | -112.75 | 8.45 | 469.00 | 8.00 |
-| 199971 | home after T2 | -169.00 | -112.75 | 412.75 | 469.00 | 6.20 |
-| 199980 | arrange T3 | -169.00 | -112.75 | -56.50 | 188.26 | 8.00 |
-| 266869 | home after T3 | -169.00 | -112.75 | 412.75 | 469.00 | 6.20 |
-| 266883 | COPY entry | 63.01 | 135.07 | 205.46 | 277.27 | 6.20 |
-| 1054075 | final home | -169.00 | -112.75 | 412.75 | 469.00 | 21.79 |
+Every final position is called *parked* (at the endstop positions), not homed: no homing happens at the end.
 
-**Known T2 detour (kept for parity, not redesigned):** after its foundation T2 parks right at 412.75 and is then sent left to −56.5 so T3 can work: path 206.976 → 412.75 → -56.5, 411.6 mm of extra carriage travel versus a direct move. Both moves are inside limits and keep ≥ 56.25 mm to the neighbours at start and end (affine parallel move), so it is inefficient, not hazardous. The oracle has the same pattern. Other reversals are by design: T1 parks right (356.5) while T0 prints and returns home afterwards; T0/T2/T3 leave their homes to reach their zones.
+| Line | Phase | T0 | T1 | T2 | T3 | Z | zero-margin pairs at target |
+|---|---|---|---|---|---|---|---|
+| 25 | park (endstop positions) | -169.00 | -112.75 | 412.75 | 469.00 | 8.00 | T0/T1, T2/T3 |
+| 45 | arrange T0 | 10.00 | 356.50 | 412.75 | 469.00 | 8.00 | T1/T2, T2/T3 |
+| 66728 | park after T0 | -169.00 | -112.75 | 412.75 | 469.00 | 6.20 | T0/T1, T2/T3 |
+| 66737 | arrange T1 | -169.00 | 190.06 | 412.75 | 469.00 | 8.00 | T2/T3 |
+| 133376 | park after T1 | -169.00 | -112.75 | 412.75 | 469.00 | 6.20 | T0/T1, T2/T3 |
+| 133385 | arrange T2 | -169.00 | -112.75 | 8.45 | 469.00 | 8.00 | T0/T1 |
+| 199971 | park after T2 | -169.00 | -112.75 | 412.75 | 469.00 | 6.20 | T0/T1, T2/T3 |
+| 199980 | arrange T3 | -169.00 | -112.75 | -56.50 | 188.26 | 8.00 | T0/T1, T1/T2 |
+| 266869 | park after T3 | -169.00 | -112.75 | 412.75 | 469.00 | 6.20 | T0/T1, T2/T3 |
+| 266883 | COPY entry | 63.01 | 135.07 | 205.46 | 277.27 | 6.20 | - |
+| 1054075 | final park | -169.00 | -112.75 | 412.75 | 469.00 | 21.79 | T0/T1, T2/T3 |
 
-While a head prints its foundation the others are off the bed (T0 run: T1 356.5, T2 412.75, T3 469; T3 run: T2 −56.5). If the 'parked-head discrepancy' you saw is one of these positions, the table above shows exactly where every carriage is.
+**Parked-head discrepancy (your observation: during the T3 foundation T0 looked correctly parked, T1 was right of −112.75 and T2 immediately right of T1).** Commanded state in both the oracle and the candidate during that phase: T0 −169.00, T1 −112.75, T2 −56.50, i.e. T1/T2 commanded exactly at the 56.25 mm minimum clearance — **0.000 mm margin** (T0/T1 also 0 by the endstop positions). The verifier proves only *commanded* non-overlap along every modelled path (min margin on all parallel-move paths 0.0 mm). It cannot show when or why T1 was displaced, nor that the T2 right-then-left detour caused it; that needs physical confirmation (e.g. checking T1 position before/after the T3-arrange move). With zero commanded margin any displacement of T1 to the right means physical contact with T2. Option added, not default (parity kept): `--park-margin M` keeps stacked parks M mm above the minimum clearance (e.g. T2 at −56.5 + M during the T3 run).
 
-## 5. What is measured, assumed and physically unverified
+**T2 detour (kept for parity, not redesigned):** after its foundation T2 is parked right at 412.75 and then sent left to −56.5 for the T3 run: path 206.976 → 412.75 → -56.5, 411.6 mm of extra carriage travel versus a direct move. Commanded gaps stay ≥ 56.25 mm along the whole path (affine non-ARRIVING branch, checked at 21 points).
 
-* **Measured inputs (profile)**: saved mesh `default` 9×9, tool offsets (bed_pin_offsets.json), carriage limits, Y/Z ranges, min clearance 56.25 (quadro_parallel_carriage), extruder rotation distances (kept per extruder in COPY via `SYNC_EXTRUDER_MOTION`).
-* **Assumed macro/firmware behaviour** (not executable offline): `_PRINT_HOME` homes, probes Z at (150,150) where the mesh is 0, leaves T0 primary at X150 with T1 at 356.5 (homing's `QUADRO_DISTRIBUTE_X`); `QUADRO_PARALLEL_MOVE` is affine; COPY copies the primary X motion with the current offset; `M109`/`M190` wait. Initial filament state of T1–T3 assumed primed.
-* **Software-validated**: everything in sections 2–4 for this slice/profile; other counts/models only by the same checks (reference layout preset (reference-300, 40 copies) compared against the reviewed oracle; other counts/models are verified by the same software checks but have no physical print evidence).
-* **Not physically validated**: no print, no motion on hardware. The oracle's successful print is evidence for its own file, not for this candidate's differences (prime lanes, wipes, transfer heights).
+Cleanup after the last extrusion (exact commands): `SET_FAN_SPEED FAN=fan_t0 SPEED=0; SET_FAN_SPEED FAN=fan_t1 SPEED=0; SET_FAN_SPEED FAN=fan_t2 SPEED=0; SET_FAN_SPEED FAN=fan_t3 SPEED=0; M400; SYNC_EXTRUDER_MOTION EXTRUDER=extruder MOTION_QUEUE=extruder; SYNC_EXTRUDER_MOTION EXTRUDER=extruder1 MOTION_QUEUE=extruder1; SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder2; SYNC_EXTRUDER_MOTION EXTRUDER=extruder3 MOTION_QUEUE=extruder3; SET_DUAL_CARRIAGE CARRIAGE=carriage_t0 MODE=PRIMARY; ACTIVATE_EXTRUDER EXTRUDER=extruder; SET_GCODE_OFFSET X=0 Y=0 Z=0 MOVE=0; G90; M83; SET_DUAL_CARRIAGE CARRIAGE=carriage_t1 MODE=INACTIVE; SET_DUAL_CARRIAGE CARRIAGE=carriage_t2 MODE=INACTIVE; SET_DUAL_CARRIAGE CARRIAGE=carriage_t3 MODE=INACTIVE; M400; SET_VELOCITY_LIMIT ACCEL=7000 ACCEL_TO_DECEL=3500; QUADRO_PARALLEL_MOVE T0=-169.00000 T1=-112.75000 T2=412.75000 T3=469.00000 SPEED=350 MIN_CLEARANCE=56.25; M400; TURN_OFF_HEATERS; SET_FAN_SPEED FAN=fan_t0 SPEED=0; SET_FAN_SPEED FAN=fan_t1 SPEED=0; SET_FAN_SPEED FAN=fan_t2 SPEED=0; SET_FAN_SPEED FAN=fan_t3 SPEED=0; BED_MESH_PROFILE LOAD=default; M82; M117 Farm Mode complete`. Motors are left enabled (no `M84`), as in the oracle.
+
+## 5. Hardware assumptions (clean statement)
+
+Software-verified means: the commanded motion satisfies every check in `CHECKS.md` under the machine model below. Nothing has been run on hardware.
+
+1. Measured inputs taken as true: the saved mesh (`default`), tool offsets (bed_pin_offsets.json), carriage/Y/Z limits, min clearance 56.25 mm, velocity/acceleration limits, extruder limits from the profile.
+2. `_PRINT_HOME TEMP BED_TEMP` homes all axes, probes Z at (150,150) (mesh value there 0), leaves T0 primary/active at X150 with zero G-code offset, T1 at 356.5 and T2/T3 at their endstops (`QUADRO_DISTRIBUTE_X`). Not executed offline.
+3. `QUADRO_PARALLEL_MOVE` without ARRIVING/Y/Z behaves as the supplied firmware's `_execute_parallel_move`: largest-displacement carriage driven, others scaled (COPY/MIRROR) → all carriages affine in one progress variable; other profiles are rejected.
+4. `SET_DUAL_CARRIAGE … MODE=COPY` copies the primary's X motion with the carriage offset at that moment; `SYNC_EXTRUDER_MOTION` keeps each extruder's rotation distance and pressure advance.
+5. `M109`/`M190` macros wait for temperature. T1–T3 start primed (loaded filament, not retracted).
+6. Carriages stay where commanded (no missed steps, no external displacement) — **contradicted once by your observation** (section 4).
+7. The bed is as measured, including the deviating point (section 6).
+
+Validated scope: reference layout preset (reference-300, 40 copies) compared against the reviewed oracle; other counts/models are verified by the same software checks but have no physical print evidence.
 
 ## 6. Physical uncertainties that need your decision
 
-1. **Mesh points that deviate markedly from their neighbours** (this printer's mesh, threshold 0.25 mm; values used unchanged):
-   * (258.75, 295.00) = -0.9387 mm, -0.523 mm vs. neighbour median -0.4156 mm. Copies depending on it (> 0.01 mm):
+1. **Mesh points that deviate markedly from their neighbours** (evaluated on this printer's mesh, threshold 0.25 mm; measured values used unchanged, never replaced):
+   * (258.75, 295.00) = -0.9387 mm, -0.523 mm vs. neighbour median -0.4156 mm. Your note: this dip was measured twice (−0.956875, then −0.938750); its physical depth is not independently confirmed. In the supplied older mesh (141253) the same probe point read −0.463125 mm and no point deviated. Copies depending on it (> 0.01 mm):
      * T0/slot8 — first layer up to 0.000 mm, foundation top up to 0.137 mm: first-layer height depends on this point by up to 0.000 mm
      * T0/slot9 — first layer up to 0.000 mm, foundation top up to 0.152 mm: first-layer height depends on this point by up to 0.000 mm
      * T1/slot8 — first layer up to 0.000 mm, foundation top up to 0.137 mm: first-layer height depends on this point by up to 0.000 mm
@@ -103,11 +143,22 @@ While a head prints its foundation the others are off the bed (T0 run: T1 356.5,
      * T2/slot9 — first layer up to 0.011 mm, foundation top up to 0.152 mm: first-layer height depends on this point by up to 0.011 mm
      * T3/slot8 — first layer up to 0.274 mm, foundation top up to 0.137 mm: first-layer nozzle height depends on this point by up to 0.274 mm (nominal first layer 0.20 mm); if the bed there is not as low as measured, the nozzle would touch the bed
      * T3/slot9 — first layer up to 0.302 mm, foundation top up to 0.152 mm: first-layer nozzle height depends on this point by up to 0.302 mm (nominal first layer 0.20 mm); if the bed there is not as low as measured, the nozzle would touch the bed
-   → Please check the bed at these point(s) before printing; after a new mesh the file is regenerated.
+   → Kept as measured. Before printing: confirm the bed shape at this point (or exclude those copies with a smaller count/layout).
 2. **Profile freshness cannot be proven** from the archive (all entries carry the same timestamp). Mesh 2026-11-13 14:37 and offsets from the Nov 12 snapshot are assumed current.
 3. Prime lines lie at y < 5 mm, outside the measured mesh (edge row is used, as Klipper does).
 
 ## 7. Negative and regeneration cases
+
+Verifier mutation cases on the real candidate (must be rejected):
+
+| Case | Exit | Diagnostics | Rejected as expected |
+|---|---|---|---|
+| missing_acceleration | 3 | ACCELERATION, VISIT_MISMATCH | True |
+| changed_pressure_advance_T2 | 3 | PRESSURE_ADVANCE | True |
+| narrow_gap_changed_park_T2 | 3 | CARRIAGE_CLEARANCE, QPM_CLEARANCE | True |
+| unsupported_arriving_profile | 3 | QPM_UNSUPPORTED_PROFILE | True |
+
+Adversarial unit tests additionally mutate a synthetic output (missing/changed/over-limit acceleration, missing/changed pressure advance, narrowed and crossing park trajectories, ARRIVING and Y profiles, lowered transfer, removed or duplicated model moves, first layer too low, changed feedrate, missing heater shutdown / final park / unsync, over-temperature, cold extrusion, unknown command, stacked runtime mesh) and the planner (extreme offsets, steep mesh, implausible offsets, negative park margin).
 
 | Case | Exit | G-code written | Diagnostics |
 |---|---|---|---|
@@ -131,7 +182,7 @@ While a head prints its foundation the others are off the bed (T0 run: T1 356.5,
 ## 8. Reproduce
 
 ```
-python3 tools/run_acceptance.py --fixtures <folder with single_shark.gcode, profile.zip, reference_40.gcode> --out <out>
+python3 tools/run_acceptance.py --fixtures <folder with single_shark.gcode, profile.zip, reference_40.gcode> --historical <folder with historical_foundations.txt, old_mesh.cfg> --out <out>
 python3 tools/write_report.py --acceptance <out> --out REPORT.md
 ```
 
@@ -139,8 +190,7 @@ Commands and timings of this run: `results/acceptance_run.json`; machine-readabl
 
 ## 9. Open questions
 
-1. Is the bed really as measured at (258.75, 295.00)? (decides T3/slot8, T3/slot9)
-2. Which parked-head discrepancy did you observe on the oracle print (time/phase)? The park table above can be matched to it.
-3. Keep the T2 right-then-left park for parity, or allow a direct T2 move in milestone 2?
-4. OK to keep the slicer's end-of-part wipes and the non-overlapping prime lanes (differences 1–2 above)?
-5. Foundation E: which rule did the reviewed file use for layers 2–5 (open finding in section 3)?
+1. Can T1's position be checked physically before and after the T3-arrange move (line of 'arrange T3' in section 4)? Should `--park-margin` (e.g. 2 mm) become the default once confirmed?
+2. Is the dip at the deviating mesh point physically confirmed? Until then the dependent copies stay flagged.
+3. Keep the direct flow-area method for foundation E (production), with the historical remesh only as a parity explanation?
+4. Keep the T2 right-then-left park for parity, or allow a direct T2 move in milestone 2?
