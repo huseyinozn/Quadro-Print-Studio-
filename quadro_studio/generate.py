@@ -246,11 +246,16 @@ class FarmGenerator:
         slots = plan.slots
         order_fwd = list(slots)
         order_rev = list(reversed(slots))
-        n = len(slots) * 4
+        H = list(plan.heads)
+        n = len(slots) * len(H)
+        title = "Farm Mode" if plan.mode == "farm" else "Copy Mode"
 
-        out("; Quadro Print Studio %s - Farm Mode" % __version__)
+        out("; Quadro Print Studio %s - %s" % (__version__, title))
         out("; CANDIDATE OUTPUT - software-verified only, NOT validated on hardware.")
-        out("; copies=%d (4 heads x %d) layers=%d foundation_layers=%d preset=%s" % (n, len(slots), nL, F, o["preset"]))
+        out("; copies=%d (%d heads x %d) layers=%d foundation_layers=%d preset=%s" % (n, len(H), len(slots), nL, F, o["preset"]))
+        if len(H) < 4:
+            out("; printing heads: %s; parked for the whole print: %s" % (",".join("T%d" % t for t in H),
+                                                                         ",".join("T%d" % t for t in range(4) if t not in H)))
         out("; slice_sha256=%s profile_fingerprint=%s mesh=%s" % (self.input_sha, self.profile_fp, p.mesh_name))
         out("; tool offsets (x,y,z) applied in coordinates: " + " ".join(
             "T%d=(%.4f,%.4f,%.4f)" % (t, *plan.offsets[t]) for t in range(4)))
@@ -270,15 +275,18 @@ class FarmGenerator:
         out("M190 S%s" % _fmt(bed, 0))
         self.qpm(plan.park_home, "park-at-endstop-positions")
         for t in range(4):
-            out("M104 T%d S%s" % (t, _fmt(o["standby_temp"], 0)))
+            out("M104 T%d S%s" % (t, _fmt(o["standby_temp"] if t in H else 0, 0)))
             out("SET_PRESSURE_ADVANCE EXTRUDER=%s ADVANCE=%s" % (EXTR[t], repr(m.pressure_advance)))
             self.set_fans([t], 0.0)
         out("SET_PRINT_STATS_INFO TOTAL_LAYER=%d CURRENT_LAYER=1" % nL)
 
         # ---------------- independent foundation, one head after another -------------
-        for a in range(4):
+        lead = int(o.get("preheat_lead_layers") or 0)
+        preheated = set()
+        for ai, a in enumerate(H):
             out("; ===== FOUNDATION T%d: layers 1..%d, %d slots =====" % (a, F, len(slots)))
-            out("M104 T%d S%s" % (a, _fmt(temp, 0)))
+            if a not in preheated:
+                out("M104 T%d S%s" % (a, _fmt(temp, 0)))
             zp = max(self.safe_z([0, 1, 2, 3], o["park_clearance"]), o["start_z"])
             self.lift_to(zp)
             pos = {}
@@ -320,7 +328,12 @@ class FarmGenerator:
             self.retract([a], self.retract_len)
             out("; FARM_PURGE_END")
             fan_state = None
+            nxt = H[ai + 1] if ai + 1 < len(H) else None
             for L in range(1, F + 1):
+                if lead and nxt is not None and L == max(1, F - lead + 1):
+                    out("; preheat next head while T%d prints layer %d" % (a, L))
+                    out("M104 T%d S%s" % (nxt, _fmt(temp, 0)))
+                    preheated.add(nxt)
                 for c in m.gap_events.get(L, []):
                     if c.kind == "fan":
                         self.set_fans([a], float(c.text.split()[1]))
@@ -331,29 +344,29 @@ class FarmGenerator:
             zp = self.safe_z([0, 1, 2, 3], o["park_clearance"])
             self.lift_to(zp)
             self.qpm(plan.park_home, "park-after-T%d" % a)
-            if a < 3:
+            if a != H[-1]:
                 out("M104 T%d S%s" % (a, _fmt(o["standby_temp"], 0)))
 
         # ---------------- COPY mode -------------------------------------------------------
-        out("; ===== COPY MODE: layers %d..%d, 4 heads synchronized =====" % (F + 1, nL))
-        for t in range(4):
+        out("; ===== COPY MODE: layers %d..%d, %d heads synchronized =====" % (F + 1, nL, len(H)))
+        for t in H:
             out("M104 T%d S%s" % (t, _fmt(temp, 0)))
-        for t in range(4):
+        for t in H:
             out("M109 T%d S%s" % (t, _fmt(temp, 0)))
         first_slot = order_fwd[0] if (F + 1) % 2 == 1 else order_rev[0]
         b = m.blocks[F]
         x0c, _ = plan.cmd_xy(0, first_slot, b.moves()[0].x0, b.moves()[0].y0, copy=True)
-        pos = {t: x0c + plan.copy_carriage_delta[t] for t in range(4)}
+        pos = {t: (x0c + plan.copy_carriage_delta[t]) if t in H else plan.park_home[t] for t in range(4)}
         self.qpm(pos, "copy-entry")
         out("SET_DUAL_CARRIAGE CARRIAGE=carriage_t0 MODE=PRIMARY")
         out("ACTIVATE_EXTRUDER EXTRUDER=extruder")
         out("SET_GCODE_OFFSET X=0 Y=0 Z=0 MOVE=0")
         out("G90")
         out("M83")
-        for t in (1, 2, 3):
+        for t in H[1:]:
             out("SET_DUAL_CARRIAGE CARRIAGE=carriage_t%d MODE=COPY" % t)
             out("SYNC_EXTRUDER_MOTION EXTRUDER=%s MOTION_QUEUE=extruder" % EXTR[t])
-        allt = [0, 1, 2, 3]
+        allt = list(H)
         for L in range(F + 1, nL + 1):
             out("SET_PRINT_STATS_INFO TOTAL_LAYER=%d CURRENT_LAYER=%d" % (nL, L))
             for c in m.gap_events.get(L, []):
@@ -387,7 +400,7 @@ class FarmGenerator:
             self.fan[t] = 0.0
         out("BED_MESH_PROFILE LOAD=%s" % p.mesh_name)
         out("M82")
-        out("M117 Farm Mode complete")
+        out("M117 %s complete" % title)
         text = self.out.text()
         return text
 

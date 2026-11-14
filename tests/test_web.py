@@ -172,7 +172,8 @@ class WebExamplesAndMeshMarks(WebBase):
         ex = {e["id"]: e for e in json.loads(data)}
         self.assertTrue(ex["sharks-40"]["available"])
         self.assertEqual(ex["sharks-40"]["mode"], "Farm Mode")
-        self.assertFalse(ex["orcacube"]["available"])
+        self.assertTrue(ex["orcacube"]["available"])
+        self.assertEqual(ex["orcacube"]["mode_id"], "copy")
         self.assertFalse(ex["fidgets-2c"]["available"])
         self.assertNotIn("file", ex["sharks-40"])                # example source is never offered for download
         for e in ex.values():
@@ -190,8 +191,6 @@ class WebExamplesAndMeshMarks(WebBase):
         self.assertEqual(r["model"]["layers"], 83)
 
     def test_coming_soon_example_refused(self):
-        st, r = self.plan_example("orcacube")
-        self.assertEqual(st, 409)
         st, r = self.plan_example("fidgets-2c")
         self.assertEqual(st, 409)
 
@@ -217,6 +216,37 @@ class WebExamplesAndMeshMarks(WebBase):
                 self.assertIn("first_layer_mm", e)
                 self.assertIn("layer_end_top_mm", e)
         self.assertEqual(len(r["layout"]["deviating_points"]), 1)
+
+    def test_orcacube_example_copy_mode(self):
+        st, r = self.plan_example("orcacube")
+        self.assertEqual(st, 200)
+        self.assertEqual(r["state"], "planned", r.get("problems"))
+        L = r["layout"]
+        self.assertEqual((L["mode"], L["count"], L["heads"], L["parked_heads"]), ("copy", 2, [0, 1], [2, 3]))
+        self.assertEqual(sorted(c["head"] for c in L["copies"]), [0, 1])
+        left = next(c for c in L["copies"] if c["head"] == 0)
+        right = next(c for c in L["copies"] if c["head"] == 1)
+        self.assertLess(max(p[0] for p in left["hull"]), min(p[0] for p in right["hull"]))   # T0 left, T1 right
+        self.assertEqual(r["model"]["layers"], 225)
+
+    def test_dual_mode_refused(self):
+        body, ct = multipart({"profile": ("p.zip", self.profile), "model": ("box.gcode", self.model), "mode": (None, "dual"), "count": (None, "2")})
+        st, data, _ = self.req("/api/plan", body, ct)
+        self.assertEqual(st, 409)
+
+    def test_copy_mode_own_model_end_to_end(self):
+        body, ct = multipart({"profile": ("p.zip", self.profile), "model": ("box.gcode", self.model), "mode": (None, "copy"), "count": (None, "7")})
+        st, data, _ = self.req("/api/plan", body, ct)
+        r = json.loads(data)
+        self.assertEqual(r["state"], "planned", r.get("problems"))
+        self.assertEqual(r["inputs"]["count"], 2)                 # the multiple-of-4 rule does not apply; Copy prints 2
+        s = self.run_job(r["job_id"])
+        self.assertEqual(s["state"], "passed", s)
+        st, data, _ = self.req(s["download_url"])
+        self.assertEqual(hashlib.sha256(data).hexdigest(), s["gcode_sha256"])
+        self.assertIn(b"; printing heads: T0,T1; parked for the whole print: T2,T3", data[:2000])
+        farm = self.plan(8)
+        self.assertNotEqual(farm["job_id"], r["job_id"])
 
     def test_clean_mesh_has_no_marks(self):
         st, r = self.plan_example("sharks-40")

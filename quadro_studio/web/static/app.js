@@ -13,7 +13,9 @@
   let pollTimer = null;
   let phase = "all";
   let source = "upload";   // "upload" | "example"
-  const EXAMPLE_ID = "sharks-40";
+  let exampleId = "sharks-40";
+  let mode = "farm";        // "farm" | "copy"
+  let examples = [];
 
   const els = {
     profile: $("profile"), model: $("model"), count: $("count"), check: $("check"),
@@ -33,29 +35,69 @@
     els.genStatus.textContent = "";
     els.gen.disabled = false;
     const haveModel = source === "example" || els.model.files.length === 1;
-    const ready = els.profile.files.length === 1 && haveModel && countValue() >= 4;
+    const ready = els.profile.files.length === 1 && haveModel && (mode === "copy" || countValue() >= 4);
     els.check.disabled = !ready;
     $("copy-info").textContent = "Tap a copy to see its details.";
   }
 
-  function setSource(src, count) {
+  function setMode(m) {
+    mode = m;
+    $("mode-farm").checked = m === "farm";
+    $("mode-copy").checked = m === "copy";
+    $("copies-help").classList.toggle("hidden", m === "copy");
+    $("stepper").classList.toggle("hidden", m === "copy");
+    $("copy-fixed").classList.toggle("hidden", m !== "copy");
+    if (m === "copy") els.count.value = 2;
+    else if (countValue() < 4) els.count.value = 40;
+    // an example belongs to one mode; switching mode drops a mismatching example
+    const ex = examples.find(e => e.id === exampleId);
+    if (source === "example" && ex && ex.mode_id !== m) source = "upload";
+    const exForMode = examples.find(e => e.mode_id === m && e.available);
+    if (exForMode) exampleId = exForMode.id;
+    refreshSource();
+    resetResults();
+  }
+
+  function refreshSource() {
+    const ex = examples.find(e => e.id === exampleId);
+    $("src-example").checked = source === "example";
+    $("src-upload").checked = source === "upload";
+    if (ex) {
+      $("src-example-l").textContent = "Example: " + ex.title;
+      $("chosen-title").textContent = ex.title;
+      $("chosen-img").src = ex.image;
+    }
+    $("example-chosen").classList.toggle("hidden", source !== "example");
+    $("upload-box").classList.toggle("hidden", source === "example");
+    for (const c of document.querySelectorAll(".ex")) c.classList.toggle("sel", source === "example" && c.dataset.id === exampleId);
+  }
+
+  $("mode-farm").addEventListener("change", () => setMode("farm"));
+  $("mode-copy").addEventListener("change", () => setMode("copy"));
+
+  function setSource(src, count, exId) {
     source = src;
-    $("src-example").checked = src === "example";
-    $("src-upload").checked = src === "upload";
-    $("example-chosen").classList.toggle("hidden", src !== "example");
-    $("upload-box").classList.toggle("hidden", src === "example");
-    for (const c of document.querySelectorAll(".ex")) c.classList.toggle("sel", src === "example" && c.dataset.id === EXAMPLE_ID);
+    if (exId) {
+      exampleId = exId;
+      const ex = examples.find(e => e.id === exId);
+      if (ex && ex.mode_id !== mode) { setMode(ex.mode_id); source = src; }
+    }
+    refreshSource();
     if (count) els.count.value = count;
     resetResults();
   }
 
-  $("src-example").addEventListener("change", () => setSource("example", 40));
+  $("src-example").addEventListener("change", () => {
+    const ex = examples.find(e => e.id === exampleId);
+    setSource("example", ex ? ex.count : null, exampleId);
+  });
   $("src-upload").addEventListener("change", () => setSource("upload"));
   $("own-model").addEventListener("click", () => { setSource("upload"); $("farm").scrollIntoView({ behavior: "smooth" }); });
 
   async function loadExamples() {
     let list = [];
     try { list = await (await fetch("/api/examples")).json(); } catch (e) { return; }
+    examples = list;
     const box = $("examples");
     box.innerHTML = "";
     for (const e of list) {
@@ -70,7 +112,7 @@
       if (e.available) {
         b.className = "primary";
         b.textContent = "Use this example";
-        b.addEventListener("click", () => { setSource("example", e.count); $("farm").scrollIntoView({ behavior: "smooth" }); });
+        b.addEventListener("click", () => { setSource("example", e.count, e.id); $("farm").scrollIntoView({ behavior: "smooth" }); });
       } else {
         b.className = "secondary";
         b.textContent = "Coming soon";
@@ -99,7 +141,7 @@
   async function checkLayout() {
     const my = epoch;
     const n = countValue();
-    if (!(n >= 4) || n % 4 !== 0) {
+    if (mode === "farm" && (!(n >= 4) || n % 4 !== 0)) {
       showReject({ problems: [{ text: "Choose a number of copies that is a multiple of 4.", detail: "" }] }, my);
       return;
     }
@@ -107,7 +149,8 @@
     els.planStatus.innerHTML = 'Checking the files and calculating the layout…<div class="prog"><i></i></div>';
     const fd = new FormData();
     fd.append("profile", els.profile.files[0]);
-    if (source === "example") fd.append("example", EXAMPLE_ID);
+    fd.append("mode", mode);
+    if (source === "example") fd.append("example", exampleId);
     else fd.append("model", els.model.files[0]);
     fd.append("count", String(n));
     let res;
@@ -165,8 +208,8 @@
     const ph = $("phases");
     ph.innerHTML = "";
     const phases = [["all", "All copies"]];
-    for (let t = 0; t < 4; t++) phases.push(["h" + t, `Layers 1–${F} · ${HEADS[t].split(" (")[0]}`]);
-    phases.push(["copy", `Layers ${F + 1}–${L.total_layers} · all heads`]);
+    for (const t of L.heads) phases.push(["h" + t, `Layers 1–${F} · ${HEADS[t].split(" (")[0]}`]);
+    phases.push(["copy", `Layers ${F + 1}–${L.total_layers} · ${L.heads.length === 4 ? "all heads" : L.heads.map(t => "T" + t).join(" + ") + " together"}`]);
     for (const [k, label] of phases) {
       const b = document.createElement("button");
       b.type = "button"; b.setAttribute("role", "tab"); b.textContent = label; b.dataset.phase = k;
@@ -176,7 +219,8 @@
     phase = "all";
     draw(L);
     const lg = $("legend");
-    lg.innerHTML = HEADS.map((h, t) => `<span><i style="background:${HC[t]}"></i>${h}: ${L.slots_per_head} copies</span>`).join("") +
+    lg.innerHTML = L.heads.map(t => `<span><i style="background:${HC[t]}"></i>${HEADS[t]}: ${L.slots_per_head} ${L.slots_per_head === 1 ? "copy" : "copies"}${L.mode === "copy" ? (t === 0 ? " (left)" : " (right)") : ""}</span>`).join("") +
+      L.parked_heads.map(t => `<span><i style="background:transparent;border:2px solid ${HC[t]}"></i>${HEADS[t]}: parked, does not print</span>`).join("") +
       (L.mesh_affected.length ? `<span><i style="background:transparent;border:2px dashed var(--bad)"></i>${L.mesh_affected.length} copies depend on a marked mesh point</span>` : "");
     const w = $("warnings");
     w.innerHTML = "";
@@ -205,7 +249,11 @@
       all: `Each head prints ${L.slots_per_head} copies. Dashed lines join the copies printed together from layer ${F + 1}.`,
       copy: `Layers ${F + 1}–${L.total_layers}: all four heads print together, ${L.head_spacing.toFixed(1)} mm apart. Each dashed line is one group printed at the same time.`,
     };
-    for (let t = 0; t < 4; t++) notes["h" + t] = `Layers 1–${F}: ${HEADS[t]} prints its ${L.slots_per_head} copies alone, after its own prime line, while the other heads wait parked.`;
+    if (L.mode === "copy") {
+      notes.all = `T0 prints the left copy, T1 the right copy. T2 and T3 stay parked. From layer ${F + 1} both copies are printed together.`;
+      notes.copy = `Layers ${F + 1}–${L.total_layers}: T0 and T1 print together, ${L.head_spacing.toFixed(1)} mm apart. T2 and T3 stay parked.`;
+    }
+    for (const t of L.heads) notes["h" + t] = `Layers 1–${F}: ${HEADS[t]} prints ${L.slots_per_head === 1 ? "its copy" : "its " + L.slots_per_head + " copies"} alone, right after its own prime line, while the other heads wait parked.`;
     $("phase-note").textContent = notes[phase];
     const svg = $("bed");
     svg.innerHTML = "";
@@ -325,12 +373,16 @@
           <span>Smallest gap between copies</span><b>${fmt(v.min_gap_mm)} mm</b>
           <span>First-layer height error</span><b>${fmt(Math.abs(v.first_layer_max_dev_mm || 0) * 1000, 1)} µm</b>
           <span>Lowest travel above printed parts</span><b>${fmt(v.min_transfer_clearance_mm)} mm</b>
-          <span>Smallest carriage spacing</span><b>${fmt(v.min_carriage_gap_mm)} mm</b>
+          <span>Head spacing while printing together</span><b>${fmt(v.min_sync_head_gap_mm)} mm</b>
+          <span>Smallest carriage spacing incl. parking</span><b>${fmt(v.min_carriage_gap_mm)} mm</b>
           <span>Heads parked, heaters off at the end</span><b>${v.final_parked && v.heaters_off ? "yes" : "no"}</b>
+          <span>Layers completed per copy</span><b id="layers-per-copy">${layersText(v)}</b>
+          <span>Heads print together from layer</span><b>${v.synchronized_from_layer ?? "–"}</b>
+          ${v.parked_heads && v.parked_heads.length ? `<span>${v.parked_heads.join(", ")} stayed parked all print</span><b>${v.parked_heads_stayed ? "yes" : "no"}</b>` : ""}
         </div>
         <a class="download" id="download" href="${s.download_url}" download="${escapeHtml(s.filename)}">Download G-code</a>
         <p class="fine">These are software checks of the generated file. It has not been tested on your printer. Watch the first layers of each head.</p>
-        <p class="fine">File ${escapeHtml(s.filename)} · SHA-256 ${s.gcode_sha256}</p>`;
+        <p class="fine hash">File ${escapeHtml(s.filename)} · SHA-256 ${s.gcode_sha256}</p>`;
     } else {
       $("result-h").textContent = "Verification failed — download blocked";
       const items = (v.problems || []).map(p => `<li>${escapeHtml(p.text)}${p.detail ? "<small>" + escapeHtml(p.detail) + "</small>" : ""}</li>`).join("")
@@ -339,6 +391,13 @@
         <ul class="problems">${items}</ul>`;
       els.gen.disabled = false;
     }
+  }
+
+  function layersText(v) {
+    const l = v.layers_per_copy || [];
+    if (!l.length) return "–";
+    const mn = Math.min(...l), mx = Math.max(...l);
+    return mn === mx ? `${mn} on all ${l.length}` : `${mn}–${mx}`;
   }
 
   function fmt(x, d = 2) { return (x === null || x === undefined || isNaN(x)) ? "–" : Number(x).toFixed(d); }

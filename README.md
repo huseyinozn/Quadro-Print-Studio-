@@ -17,7 +17,14 @@ calls an AI service.
 * Python ≥ 3.9 (tested with 3.13). **No third-party packages.**
 * Optional: nothing else. Tests use the standard `unittest` module.
 
-## Web app (Farm Mode)
+## Copy Mode
+
+`--mode copy` (CLI) or *Copy Mode* (web): exactly 2 copies; T0 prints the left copy, T1 the right copy, T2/T3 stay parked.
+Layers 1–5 are printed by T0 then T1 alone (each primes right before; T1 is preheated during T0's last foundation layer),
+from layer 6 both print together. The verifier (`verify --mode copy`) checks every layer of both copies, the exact
+switch to synchronised printing and that T2/T3 never move, activate, synchronise or extrude.
+
+## Web app (Farm Mode, Copy Mode)
 
 ```
 python3 -m quadro_studio.web            # http://127.0.0.1:8765  (add --host 0.0.0.0 to open it from a phone on the same network)

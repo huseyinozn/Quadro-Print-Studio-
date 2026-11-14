@@ -171,7 +171,7 @@ class PlaneCells:
 
 
 class Sim:
-    def __init__(self, prof, model, label, keep_arrays=True, h_limits=(0.08, 0.30), sample_every=4):
+    def __init__(self, prof, model, label, keep_arrays=True, h_limits=(0.08, 0.30), sample_every=4, heads=(0, 1, 2, 3)):
         self.prof = prof
         self.model = model
         self.label = label
@@ -234,6 +234,11 @@ class Sim:
                           first_layer_max_dev=0.0, first_layer_where=None, first_layer_points=0)
         self.unknown = {}
         self.layer_events = []
+        # heads that must not print: once parked they must stay parked, inactive and unsynced
+        self.heads = list(heads)
+        self.unused = [t for t in range(4) if t not in self.heads]
+        self.parked_at = {}          # unused head -> carriage position after the first park
+        self.unused_violations = []
 
     # ------------------------------------------------------------------ issues
     def issue(self, sev, code, msg, line):
@@ -259,6 +264,12 @@ class Sim:
             g = self.cx[t + 1] - self.cx[t]
             if g < self.stats["min_carriage_gap"]:
                 self.stats["min_carriage_gap"] = g
+        sync = [t for t in range(4) if self.mode[t] in ("PRIMARY", "COPY")]
+        if len(sync) > 1:
+            for i in range(len(sync) - 1):
+                g = self.cx[sync[i + 1]] - self.cx[sync[i]]
+                if g < self.stats.get("min_synchronized_head_gap", 1e9):
+                    self.stats["min_synchronized_head_gap"] = g
             if g < self.c - 1e-6:
                 self.issue("error", "CARRIAGE_CLEARANCE", "carriage gap T%d/T%d %.4f < %.2f" % (t, t + 1, g, self.c), line)
 
@@ -826,6 +837,9 @@ class Sim:
             if self.level[e] != self.level[q] and e != q and abs(self.level[e] - self.level[q]) > TOL["retract"]:
                 self.issue("error", "SYNC_RETRACT_MISMATCH", "extruder %d synced with different retraction state (%.4f vs %.4f)"
                            % (e, self.level[e], self.level[q]), ln)
+            if e != q and e in self.unused:
+                self.unused_violations.append("extruder%d synchronised (line %d)" % (e, ln))
+                self.issue("error", "PARKED_HEAD_ACTIVE", "extruder of parked T%d is synchronised to another head" % e, ln)
             self.queue[e] = q
             return
         if head == "SET_DUAL_CARRIAGE":
@@ -838,12 +852,18 @@ class Sim:
             mode = P.get("MODE", "PRIMARY").upper()
             self.end_visit()
             if mode == "PRIMARY":
+                if t in self.unused and self.homed:
+                    self.unused_violations.append("T%d set to PRIMARY (line %d)" % (t, ln))
+                    self.issue("error", "PARKED_HEAD_ACTIVE", "T%d is not a printing head in this mode but is made primary" % t, ln)
                 for u in range(4):
                     if self.mode[u] == "PRIMARY" and u != t:
                         self.mode[u] = "INACTIVE"
                 self.mode[t] = "PRIMARY"
                 self.primary = t
             elif mode in ("COPY", "INACTIVE"):
+                if mode == "COPY" and t in self.unused:
+                    self.unused_violations.append("T%d set to COPY (line %d)" % (t, ln))
+                    self.issue("error", "PARKED_HEAD_ACTIVE", "T%d is not a printing head in this mode but is set to COPY" % t, ln)
                 if t == self.primary:
                     self.issue("error", "OUT_MODE", "primary carriage set to %s" % mode, ln)
                 self.mode[t] = mode
@@ -929,6 +949,13 @@ class Sim:
             self.stats["est_time_s"] += dist / sp
             self.qpms.append(dict(line=ln, start={t: start[t] for t in range(4)}, target={t: tgt[t] for t in range(4)},
                                   z=self.z, y=self.y, modes=dict(self.mode)))
+            for t in self.unused:
+                if t not in self.parked_at:
+                    if abs(tgt[t] - self.home[t]) < 1e-6:
+                        self.parked_at[t] = tgt[t]
+                elif abs(tgt[t] - self.parked_at[t]) > 1e-6:
+                    self.unused_violations.append("T%d moved from its park %.3f to %.3f (line %d)" % (t, self.parked_at[t], tgt[t], ln))
+                    self.issue("error", "PARKED_HEAD_MOVED", "T%d must stay parked but is moved to %.3f" % (t, tgt[t]), ln)
             self.cx = tgt
             self.check_carriages(ln)
             return
@@ -1028,6 +1055,7 @@ def seg_err(px, py, ax, ay, bx, by):
 # ======================================================================================
 def analyse(sim: Sim, expected_count=None, min_gap=2.0):
     model = sim.model
+    heads = sim.heads
     nL = model.layer_count
     F = sim.found_layers
     res = dict(label=sim.label)
@@ -1117,7 +1145,38 @@ def analyse(sim: Sim, expected_count=None, min_gap=2.0):
         if not blocks or blocks[-1] != t:
             blocks.append(t)
     res["foundation_head_sequence"] = blocks
-    res["foundation_independent"] = blocks == [0, 1, 2, 3]
+    res["foundation_independent"] = blocks == heads
+    if blocks != heads:
+        sim.issue("error", "FOUNDATION_ORDER", "foundation printed by heads %s, expected %s one after another" % (blocks, heads), 0)
+    # COPY entry exactly after the foundation: layers <= F printed by ONE nozzle per visit,
+    # layers > F by exactly the printing heads together (decided from actual extrusion)
+    per_visit = {}
+    for v in sim.visits:
+        if "d" in v:
+            per_visit.setdefault(v["line"], dict(layer=v["layer"], nozzles=set()))["nozzles"].add(v["nozzle"])
+    wrong = []
+    for line, pv in sorted(per_visit.items()):
+        if pv["layer"] <= F and len(pv["nozzles"]) != 1:
+            wrong.append("layer %d at line %d printed by %s (expected one head)" % (pv["layer"], line, sorted(pv["nozzles"])))
+        if pv["layer"] > F and sorted(pv["nozzles"]) != heads:
+            wrong.append("layer %d at line %d printed by %s (expected %s together)" % (pv["layer"], line, sorted(pv["nozzles"]), heads))
+    first_copy = min((pv["layer"] for pv in per_visit.values() if len(pv["nozzles"]) > 1), default=None)
+    res["synchronized_from_layer"] = first_copy
+    res["copy_phase_problems"] = wrong[:10]
+    if wrong or (first_copy is not None and first_copy != F + 1):
+        sim.issue("error", "COPY_PHASE", "synchronised printing does not start exactly at layer %d with heads %s: %s"
+                  % (F + 1, heads, wrong[:2] or ["starts at layer %s" % first_copy]), 0)
+    res["parked_heads"] = dict(heads=["T%d" % t for t in sim.unused],
+                               parked_at={("T%d" % t): sim.parked_at.get(t) for t in sim.unused},
+                               stayed_parked=not sim.unused_violations, violations=sim.unused_violations[:10],
+                               extruded={("T%d" % t): round(sim.e_total[t], 4) for t in sim.unused})
+    for t in sim.unused:
+        if t not in sim.parked_at:
+            sim.issue("error", "PARKED_HEAD_MOVED", "T%d was never parked at its endstop position" % t, 0)
+        if abs(sim.e_total[t]) > 1e-9:
+            sim.issue("error", "PARKED_HEAD_ACTIVE", "parked T%d moved its extruder" % t, 0)
+    # every layer of every copy
+    res["layers_per_copy"] = {("T%d %s" % (k[0], k[1])): len(set(v)) for k, v in per_copy_layers.items()}
     if not ord_ok:
         sim.issue("error", "ORDER", "a head returns to an earlier layer", 0)
     # transitions & detours
@@ -1161,12 +1220,12 @@ def analyse(sim: Sim, expected_count=None, min_gap=2.0):
     # foundation top must be one commanded Z for the four heads of each COPY group
     groups = {}
     for v in sim.visits:
-        if v["layer"] == F + 1 and len(v.get("tools", ())) == 4 and "d" in v:
+        if v["layer"] == F + 1 and len(v.get("tools", ())) == len(heads) and "d" in v:
             groups.setdefault(v["line"], {})[v["nozzle"]] = v["d"]
     cz_max = 0.0
     cz_where = None
     for line, g in groups.items():
-        if len(g) != 4:
+        if len(g) != len(heads):
             continue
         arrs = {t: sim.arrays.get((t, F, g[t])) for t in g}
         if any(a is None for a in arrs.values()):
@@ -1174,7 +1233,7 @@ def analyse(sim: Sim, expected_count=None, min_gap=2.0):
             continue
         n = min(len(a["z"]) for a in arrs.values())
         for k in range(n):
-            vals = [arrs[t]["z"][k] + sim.off[t][2] for t in range(4)]
+            vals = [arrs[t]["z"][k] + sim.off[t][2] for t in heads]
             dv = max(vals) - min(vals)
             if dv > cz_max:
                 cz_max, cz_where = dv, dict(copy_visit_line=line, slicer_line=model.blocks[F - 1].moves()[k].line)

@@ -18,19 +18,19 @@
 <main class="wrap">
   <section class="hero">
     <h1>One model in. Four heads at work.</h1>
-    <p>Turn a single sliced model into a print for all four heads of your Quadro. Everything runs on this computer; nothing is sent to your printer.</p>
+    <p>Turn a single sliced model into a multi-head print for your Quadro. Everything runs on this computer; nothing is sent to your printer.</p>
   </section>
 
   <section aria-labelledby="modes-h">
     <h2 id="modes-h" class="sr">Modes</h2>
     <div class="modes">
-      <article class="mode on" aria-current="true">
+      <article class="mode on" data-mode="farm">
         <div class="mode-h"><h3>Farm Mode</h3><span class="tag ok">Available</span></div>
         <p>Many identical copies of one single-colour model, printed by four synchronized heads.</p>
       </article>
-      <article class="mode off" aria-disabled="true">
-        <div class="mode-h"><h3>Copy Mode</h3><span class="tag soon">Coming soon</span></div>
-        <p>Print the same model on several heads at once.</p>
+      <article class="mode on" data-mode="copy">
+        <div class="mode-h"><h3>Copy Mode</h3><span class="tag ok">Available</span></div>
+        <p>Two copies at once: T0 prints the left one, T1 the right one; T2 and T3 stay parked.</p>
       </article>
       <article class="mode off" aria-disabled="true">
         <div class="mode-h"><h3>Dual Color Copy Mode</h3><span class="tag soon">Coming soon</span></div>
@@ -47,7 +47,12 @@
   </section>
 
   <section class="card" id="farm" aria-labelledby="farm-h">
-    <h2 id="farm-h">Farm Mode</h2>
+    <h2 id="farm-h">Set up your print</h2>
+    <div class="source modepick" role="radiogroup" aria-label="Mode">
+      <label><input type="radio" name="mode" value="farm" id="mode-farm" checked> Farm Mode</label>
+      <label><input type="radio" name="mode" value="copy" id="mode-copy"> Copy Mode</label>
+      <label class="dis"><input type="radio" name="mode" value="dual" disabled> Dual Color Copy Mode <span class="tag soon">Coming soon</span></label>
+    </div>
     <ol class="steps">
       <li>
         <label for="profile" class="step-l"><span class="n">1</span>Printer profile</label>
@@ -57,12 +62,12 @@
       <li>
         <span class="step-l"><span class="n">2</span>Model</span>
         <div class="source" role="radiogroup" aria-label="Model source">
-          <label><input type="radio" name="source" value="example" id="src-example"> Example: 40 Sharks</label>
+          <label><input type="radio" name="source" value="example" id="src-example"> <span id="src-example-l">Example: 40 Sharks</span></label>
           <label><input type="radio" name="source" value="upload" id="src-upload" checked> Upload your own model</label>
         </div>
         <div id="example-chosen" class="chosen hidden">
-          <img src="/examples/sharks.png" alt="" width="56" height="56">
-          <div><b>40 Sharks</b><br><span class="help-in">The sliced model is included. Nothing to upload here.</span></div>
+          <img id="chosen-img" src="/examples/sharks.png" alt="" width="56" height="56">
+          <div><b id="chosen-title">40 Sharks</b><br><span class="help-in">The sliced model is included. Nothing to upload here.</span></div>
         </div>
         <div id="upload-box">
           <p class="help">G-code of one single-colour model from Co Print Slicer, sliced once for T0.</p>
@@ -72,8 +77,9 @@
       </li>
       <li>
         <label for="count" class="step-l"><span class="n">3</span>Copies</label>
-        <p class="help">A multiple of 4: each of the four heads prints the same number of copies.</p>
-        <div class="stepper">
+        <p class="help" id="copies-help">A multiple of 4: each of the four heads prints the same number of copies.</p>
+        <p class="help hidden" id="copy-fixed"><b>2 copies</b> — T0 prints the left copy, T1 the right copy. T2 and T3 stay parked for the whole print.</p>
+        <div class="stepper" id="stepper">
           <button type="button" id="minus" aria-label="Fewer copies">−</button>
           <input type="number" id="count" value="40" min="4" max="400" step="4" inputmode="numeric">
           <button type="button" id="plus" aria-label="More copies">+</button>
@@ -115,12 +121,12 @@
     <h2>Good to know</h2>
     <ul>
       <li>The layout is calculated from your model's size and your printer's measured bed. Bigger models fit fewer copies; models are never scaled.</li>
-      <li>Layers 1–5 are printed by each head on its own, so every head starts exactly on the measured bed. From layer 6 on, all four heads print together.</li>
+      <li>Layers 1–5 are printed by each head on its own, so every head starts exactly on the measured bed. From layer 6 on, the heads print together.</li>
       <li>Every file is checked by a separate verification step before it can be downloaded. Passing these software checks does not mean the file was tested on your printer.</li>
     </ul>
   </section>
 </main>
-<footer class="wrap foot">Quadro Print Studio · Farm Mode</footer>
+<footer class="wrap foot">Quadro Print Studio · Farm Mode · Copy Mode</footer>
 <script src="/app.js"></script>
 </body>
 </html>

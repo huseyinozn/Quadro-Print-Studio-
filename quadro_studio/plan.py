@@ -42,9 +42,13 @@ PRESETS = {
 }
 
 
+MODES = {"farm": dict(heads=4), "copy": dict(heads=2)}
+
+
 @dataclass
 class LayoutOptions:
     count: int = 40
+    mode: str = "farm"                    # farm (T0-T3, identical copies) | copy (T0+T1, two copies)
     preset: str = "reference-300"         # reference-300 | auto
     sync_pitch: float | None = None
     cols_per_zone: int | None = None
@@ -69,6 +73,8 @@ class LayoutOptions:
     purge_step: float = 2.0
     purge_edge_margin: float = 10.0
     purge_lane_gap: float = 0.7
+    preheat_lead_layers: int | None = None   # start heating the next head this many layers before it prints
+    head_margin: float = 5.0              # auto layout: synchronized heads keep min_clearance + this margin
     park_margin: float = 0.0              # extra gap (mm) above min clearance for stacked (non-endstop) parks
     parallel_speed: float = 350.0
     park_accel: float = 7000.0
@@ -78,6 +84,9 @@ class LayoutOptions:
 
     def resolved(self):
         d = asdict(self)
+        d["heads"] = list(range(MODES.get(self.mode, MODES["farm"])["heads"]))
+        if d["preheat_lead_layers"] is None:
+            d["preheat_lead_layers"] = 1 if self.mode == "copy" else 0
         if self.preset in PRESETS:
             for k, v in PRESETS[self.preset].items():
                 if d.get(k) is None:
@@ -119,6 +128,8 @@ class Plan:
     foundation_stats: dict = field(default_factory=dict)
     footprints: dict = field(default_factory=dict)
     validated_scope: str = ""
+    heads: list = field(default_factory=lambda: [0, 1, 2, 3])
+    mode: str = "farm"
     mesh: BedMesh = None
 
     # ------------------------------------------------------------------ model
@@ -127,7 +138,7 @@ class Plan:
         return (mesh or self.mesh).z(x + self.sync_pitch * t, y - o[1]) + o[2]
 
     def mid(self, x, y, mesh=None):
-        v = [self.S(t, x, y, mesh) for t in range(4)]
+        v = [self.S(t, x, y, mesh) for t in self.heads]
         return 0.5 * (max(v) + min(v))
 
     def zbase(self, L, t, x, y, mesh=None):
@@ -236,9 +247,11 @@ def auto_layout(model, prof, o, k):
     mx0, my0, mx1, my1 = model.bbox_motion
     W = max(ex1 - ex0, mx1 - mx0)
     H = max(ey1 - ey0, my1 - my0)
-    oxs = [prof.offsets[t].x for t in range(4)]
-    oys = [prof.offsets[t].y for t in range(4)]
-    need_sync = prof.min_clearance + max(0.0, max(oxs[t] - oxs[t + 1] for t in range(3)))
+    heads = o.get("heads", [0, 1, 2, 3])
+    nh = len(heads)
+    oxs = [prof.offsets[t].x for t in heads]
+    oys = [prof.offsets[t].y for t in heads]
+    need_sync = prof.min_clearance + o.get("head_margin", 0.0) + max([0.0] + [oxs[i] - oxs[i + 1] for i in range(nh - 1)])
     dy = max(oys) - min(oys)          # copies of different heads are shifted in Y by their offsets
     g = 5.0
     while g >= o["min_gap"] - 1e-9:
@@ -246,7 +259,7 @@ def auto_layout(model, prof, o, k):
             rows = int(math.ceil(k / float(cols)))
             cp, rp = W + g, H + g
             sync = max(need_sync, (cols - 1) * cp + W + g)
-            span_x = 3 * sync + (cols - 1) * cp + W
+            span_x = (nh - 1) * sync + (cols - 1) * cp + W
             span_y = (rows - 1) * rp + H + dy
             if span_x <= (ux1 - ux0) - 1e-9 and span_y <= (uy1 - uy0) - 1e-9:
                 return (cols, sync, cp, rp, 0.5 * (ux0 + ux1), 0.5 * (uy0 + uy1))
@@ -255,7 +268,9 @@ def auto_layout(model, prof, o, k):
 
 
 def suggest_count(model, prof, opts, requested):
-    """Largest multiple of 4 below ``requested`` for which a full plan passes."""
+    """Largest multiple of 4 below ``requested`` for which a full plan passes (Farm Mode)."""
+    if opts.mode != "farm":
+        return None, None
     from dataclasses import replace
     c = (requested // 4) * 4
     if c == requested:
@@ -282,7 +297,16 @@ def make_plan(model, prof, opts: LayoutOptions):
 
     # ---- basic request validation -------------------------------------------------
     n = o["count"]
-    if n < 4 or n % 4:
+    heads = o["heads"]
+    nh = len(heads)
+    if o["mode"] not in MODES:
+        diags.error("PLAN_MODE", "unknown mode %r" % o["mode"])
+        return None, diags
+    if o["mode"] == "copy" and n != 2:
+        diags.error("PLAN_COUNT", "Copy Mode prints exactly 2 copies (T0 left, T1 right); %d requested" % n,
+                    "Choose 2 copies, or Farm Mode for more identical copies.")
+        return None, diags
+    if o["mode"] == "farm" and (n < 4 or n % 4):
         diags.error("PLAN_COUNT", "requested count %d is not a positive multiple of 4" % n,
                     "Farm Mode prints identical copies on four synchronized heads; choose 4, 8, 12, ...")
         return None, diags
@@ -316,7 +340,7 @@ def make_plan(model, prof, opts: LayoutOptions):
     fcx, fcy = 0.5 * (fx0 + fx1), 0.5 * (fy0 + fy1)
     mx0, my0, mx1, my1 = model.bbox_motion
     hull = model.hull
-    k = n // 4
+    k = n // nh
     offs = {t: (prof.offsets[t].x, prof.offsets[t].y, prof.offsets[t].z) for t in range(4)}
     bed = [float(v) for p in model.config["printable_area"].split(",") for v in p.split("x")] if model.config["printable_area"] else [0, 0, 300, 0, 300, 300, 0, 300]
     bx0, by0, bx1, by1 = min(bed[0::2]), min(bed[1::2]), max(bed[0::2]), max(bed[1::2])
@@ -340,7 +364,7 @@ def make_plan(model, prof, opts: LayoutOptions):
     cp = float(o["col_pitch"])
     rp = float(o["row_pitch"])
     rows = int(math.ceil(k / float(cols)))
-    span_x = 3 * sync + (cols - 1) * cp
+    span_x = (nh - 1) * sync + (cols - 1) * cp
     x0 = cxb - span_x / 2.0
     y0 = cyb - (rows - 1) * rp / 2.0
     slots = []
@@ -356,11 +380,11 @@ def make_plan(model, prof, opts: LayoutOptions):
                 bbox_extrude=model.bbox_extrude, generator=model.generator), slots=slots, sync_pitch=sync,
                 offsets=offs, layer_z=[b.z for b in model.blocks], foundation_layers=F, park_home=home,
                 left_stack=left, right_stack=right, purge={}, copy_carriage_delta={}, tool_ranges={},
-                copy_range=(0, 0), mesh=mesh)
+                copy_range=(0, 0), mesh=mesh, heads=list(heads), mode=o["mode"])
 
     # ---- per-copy physical footprints ----------------------------------------------
     copies = {}
-    for t in range(4):
+    for t in heads:
         for s in slots:
             dxp, dyp = s.dx + sync * t, s.dy - offs[t][1]
             copies[(t, s.index)] = dict(hull=translate(hull, dxp, dyp),
@@ -381,7 +405,7 @@ def make_plan(model, prof, opts: LayoutOptions):
     for i in range(len(keys)):
         for j in range(i + 1, len(keys)):
             a, b = copies[keys[i]], copies[keys[j]]
-            if bbox_gap(a["bbox"], b["bbox"]) > o["min_gap"] + 5:
+            if bbox_gap(a["bbox"], b["bbox"]) > 60.0:
                 continue
             d = poly_distance(a["hull"], b["hull"])
             if d < min_gap:
@@ -422,7 +446,7 @@ def make_plan(model, prof, opts: LayoutOptions):
 
     # ---- carriage ranges ----------------------------------------------------------------
     c = prof.min_clearance
-    for t in range(4):
+    for t in heads:
         xs = []
         for s in slots:
             xs += [mx0 + s.dx + sync * t + offs[t][0], mx1 + s.dx + sync * t + offs[t][0]]
@@ -434,26 +458,35 @@ def make_plan(model, prof, opts: LayoutOptions):
         plan.tool_ranges[t] = dict(lo=lo, hi=hi, allowed=[allow_lo, allow_hi])
         check("tool_reach_T%d" % t, allow_lo - 1e-6 <= lo and hi <= allow_hi + 1e-6,
               "T%d independent work range carriage [%.2f, %.2f] within allowed [%.2f, %.2f] (others parked at stacks)" % (t, lo, hi, allow_lo, allow_hi))
-    delta = {t: sync * t + offs[t][0] for t in range(4)}
+    delta = {t: sync * t + offs[t][0] for t in heads}
     plan.copy_carriage_delta = delta
     xs = [v for s in slots for v in (mx0 + s.dx, mx1 + s.dx)]
     lo, hi = min(xs), max(xs)
     plan.copy_range = (lo, hi)
     ok = True
-    for t in range(4):
+    for t in heads:
         if lo + delta[t] < prof.carriages[t].position_min - 1e-6 or hi + delta[t] > prof.carriages[t].position_max + 1e-6:
             ok = False
     check("copy_limits", ok, "COPY mode carriage ranges within limits (T0 X %.2f..%.2f)" % (lo, hi))
-    spacing = [delta[t + 1] - delta[t] for t in range(3)]
-    check("copy_clearance", min(spacing) >= c - 1e-9, "COPY carriage spacing %s >= %.2f" % (["%.4f" % v for v in spacing], c))
-    ys = [my0 + s.dy for s in slots] + [my1 + s.dy for s in slots] + [plan.purge[t]["y"] + offs[t][1] for t in range(4)]
+    if len(heads) > 1:
+        spacing = [delta[heads[i + 1]] - delta[heads[i]] for i in range(len(heads) - 1)]
+        check("copy_clearance", min(spacing) >= c - 1e-9, "COPY carriage spacing %s >= %.2f" % (["%.4f" % v for v in spacing], c))
+    unused = [t for t in range(4) if t not in heads]
+    if unused:
+        # heads that do not print stay parked at their endstop positions for the whole print
+        last, nxt = heads[-1], unused[0]
+        margin = home[nxt] - (hi + delta[last])
+        check("parked_heads_clear", margin >= c - 1e-9,
+              "COPY phase: T%d reaches carriage %.2f, parked T%d at %.2f -> gap %.2f >= %.2f"
+              % (last, hi + delta[last], nxt, home[nxt], margin, c))
+    ys = [my0 + s.dy for s in slots] + [my1 + s.dy for s in slots] + [plan.purge[t]["y"] + offs[t][1] for t in heads]
     check("y_limits", prof.y_range[0] <= min(ys) and max(ys) <= prof.y_range[1], "Y range %.2f..%.2f within %s" % (min(ys), max(ys), prof.y_range))
 
     # ---- foundation thickness + outlier influence -----------------------------------------
     hmin, hmax = o["h_min_ratio"] * nozzle, o["h_max_ratio"] * nozzle
     stats = {}
     glob = [1e9, -1e9]
-    for t in range(4):
+    for t in heads:
         for s in slots:
             lo_h, hi_h = 1e9, -1e9
             for L in range(2, F + 1):
@@ -484,7 +517,7 @@ def make_plan(model, prof, opts: LayoutOptions):
         pts[ol["iy"]][ol["ix"]] = ol["neighbour_median"]
         alt = BedMesh(pts, mesh.min_x, mesh.max_x, mesh.min_y, mesh.max_y, mesh.x_count, mesh.y_count,
                       mesh.x_pps, mesh.y_pps, mesh.algo, mesh.tension, "comparison only")
-        for t in range(4):
+        for t in heads:
             for s in slots:
                 d1 = max(abs(plan.S(t, m.x + s.dx, m.y + s.dy) - plan.S(t, m.x + s.dx, m.y + s.dy, alt)) for m in l1)
                 dF = max(abs(plan.zbase(F, t, m.x + s.dx, m.y + s.dy) - plan.zbase(F, t, m.x + s.dx, m.y + s.dy, alt)) for m in lF)

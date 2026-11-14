@@ -47,13 +47,13 @@ EXAMPLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples
 # Public example slicer inputs (no printer calibration inside). Only modes with a
 # finished converter + verifier are selectable; the others are shown as examples.
 EXAMPLES = [
-    dict(id="sharks-40", title="40 Sharks", mode="Farm Mode", available=True, count=40,
+    dict(id="sharks-40", title="40 Sharks", mode="Farm Mode", mode_id="farm", available=True, count=40,
          file="sharks_single.gcode", image="/examples/sharks.png",
          text="One shark sliced once; 40 identical copies, 10 per head. You only upload your printer profile."),
-    dict(id="orcacube", title="OrcaCube", mode="Copy Mode", available=False, count=None,
+    dict(id="orcacube", title="OrcaCube", mode="Copy Mode", mode_id="copy", available=True, count=2,
          file="orca_cube.gcode", image="/examples/orcacube.png",
-         text="The same cube printed by several heads at the same time."),
-    dict(id="fidgets-2c", title="Two-Color Fidgets", mode="Dual Color Copy Mode", available=False, count=None,
+         text="Two cubes at the same time: T0 prints the left one, T1 the right one. You only upload your printer profile."),
+    dict(id="fidgets-2c", title="Two-Color Fidgets", mode="Dual Color Copy Mode", mode_id="dual", available=False, count=None,
          file="two_color_fidget.gcode", image="/examples/fidgets.png",
          text="Two two-colour fidgets at once: T0 and T1 print one colour on both models together, T2 and T3 the other colour."),
 ]
@@ -114,9 +114,13 @@ class App:
         self.post_generate_hook = post_generate_hook
 
     # ---------------------------------------------------------------- plan
-    def plan(self, slice_name, slice_bytes, profile_bytes, count):
+    def plan(self, slice_name, slice_bytes, profile_bytes, count, mode="farm"):
+        if mode not in ("farm", "copy"):
+            raise ValueError("unknown mode")
+        if mode == "copy":
+            count = 2
         ss, ps = sha256_bytes(slice_bytes), sha256_bytes(profile_bytes)
-        jid = sha256_bytes(("%s|%s|%d|%s" % (ss, ps, count, ENGINE)).encode())[:20]
+        jid = sha256_bytes(("%s|%s|%d|%s|%s" % (ss, ps, count, mode, ENGINE)).encode())[:20]
         with self.lock:
             job = self.jobs.get(jid)
             if job is not None and job.state not in ("error",):
@@ -129,7 +133,8 @@ class App:
             f.write(slice_bytes)
         with open(os.path.join(folder, "profile.zip"), "wb") as f:
             f.write(profile_bytes)
-        job.inputs = dict(model=os.path.basename(slice_name or "model.gcode")[:120], model_sha256=ss, profile_sha256=ps, count=count)
+        job.inputs = dict(model=os.path.basename(slice_name or "model.gcode")[:120], model_sha256=ss, profile_sha256=ps,
+                          count=count, mode=mode)
         diags = Diagnostics()
         result = dict(job_id=jid, inputs=job.inputs)
         try:
@@ -145,9 +150,9 @@ class App:
             result.update(state=job.state, message=job.message, problems=messages.explain(diags), warnings=[])
             job.layout = result
             return job, result
-        opts = LayoutOptions(count=count, preset="auto")
+        opts = LayoutOptions(count=count, preset="auto", mode=mode)
         plan, d3 = (None, None)
-        if count % 4 or not (MIN_COUNT <= count <= MAX_COUNT):
+        if mode == "farm" and (count % 4 or not (MIN_COUNT <= count <= MAX_COUNT)):
             d3 = Diagnostics()
             d3.error("PLAN_COUNT", "requested count %d is not a multiple of 4 between %d and %d" % (count, MIN_COUNT, MAX_COUNT))
         else:
@@ -166,7 +171,8 @@ class App:
                                               "PLAN_PURGE_LANES", "PLAN_Y_LIMITS", "PLAN_TOOL_REACH_T0", "PLAN_TOOL_REACH_T1",
                                               "PLAN_TOOL_REACH_T2", "PLAN_TOOL_REACH_T3", "PLAN_COPY_LIMITS") for d in diags.errors) \
                     and all(d.code.startswith("PLAN_") for d in diags.errors):
-                alt_c, alt_plan = suggest_count(model, prof, LayoutOptions(count=min(count, MAX_COUNT), preset="auto"), min(count, MAX_COUNT))
+                alt_c, alt_plan = (suggest_count(model, prof, LayoutOptions(count=min(count, MAX_COUNT), preset="auto"), min(count, MAX_COUNT))
+                                   if mode == "farm" else (None, None))
             if alt_c:
                 result["alternative"] = dict(count=alt_c, layout=layout_json(model, prof, alt_plan),
                                              note="%d copies fit: the full layout checks pass for this model and profile." % alt_c)
@@ -206,7 +212,7 @@ class App:
                 os.remove(out)
             model, _ = load_slice(os.path.join(folder, "model.gcode"))
             prof, _ = load_profile(os.path.join(folder, "profile.zip"))
-            plan, d = make_plan(model, prof, LayoutOptions(count=job.inputs["count"], preset="auto"))
+            plan, d = make_plan(model, prof, LayoutOptions(count=job.inputs["count"], preset="auto", mode=job.inputs["mode"]))
             if plan is None or not d.ok():
                 raise RuntimeError("plan no longer valid")
             text, info = generate(model, prof, plan, job.inputs["model_sha256"], prof.fingerprint)
@@ -220,7 +226,7 @@ class App:
             vjson = os.path.join(folder, "verify.json")
             if os.path.exists(vjson):
                 os.remove(vjson)
-            cmd = [sys.executable, "-m", "quadro_studio", "verify", "--slice", os.path.join(folder, "model.gcode"),
+            cmd = [sys.executable, "-m", "quadro_studio", "verify", "--mode", job.inputs["mode"], "--slice", os.path.join(folder, "model.gcode"),
                    "--profile", os.path.join(folder, "profile.zip"), "--gcode", out, "--count", str(job.inputs["count"]),
                    "--foundation-layers", str(plan.foundation_layers), "--min-gap", str(plan.options["min_gap"]), "--out", vjson]
             env = dict(os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -230,7 +236,7 @@ class App:
             if p.returncode == 0 and res and res.get("passed") and json.load(open(vjson)).get("candidate_sha256") == produced_sha:
                 job.verified_sha = produced_sha
                 base = os.path.splitext(job.inputs["model"])[0][:60] or "model"
-                job.gcode_name = "%s_farm_%dx.gcode" % (base, job.inputs["count"])
+                job.gcode_name = "%s_%s_%dx.gcode" % (base, job.inputs["mode"], job.inputs["count"])
                 job.state = "passed"
                 job.message = "Software checks passed."
             else:
@@ -277,12 +283,13 @@ def layout_json(model, prof, plan):
             c["mesh_effects"] = effects[k]
     groups = []
     for s in plan.slots:
-        groups.append([[round(s.cx + plan.sync_pitch * t, 3), round(s.cy - plan.offsets[t][1], 3)] for t in range(4)])
+        groups.append([[round(s.cx + plan.sync_pitch * t, 3), round(s.cy - plan.offsets[t][1], 3)] for t in plan.heads])
     m = prof.mesh
     return dict(
         bed=[0, 0, 300, 300], mesh_area=[m.min_x, m.min_y, m.max_x, m.max_y],
-        copies=copies, groups=groups, slots_per_head=len(plan.slots), count=len(plan.slots) * 4,
-        purge=[dict(head=t, x0=plan.purge[t]["x0"], x1=plan.purge[t]["x1"], y=plan.purge[t]["y"]) for t in range(4)],
+        mode=plan.mode, heads=list(plan.heads), parked_heads=[t for t in range(4) if t not in plan.heads],
+        copies=copies, groups=groups, slots_per_head=len(plan.slots), count=len(plan.slots) * len(plan.heads),
+        purge=[dict(head=t, x0=plan.purge[t]["x0"], x1=plan.purge[t]["x1"], y=plan.purge[t]["y"]) for t in plan.heads],
         purge_width=plan.purge["width_est"],
         foundation_layers=F, total_layers=len(plan.layer_z),
         head_spacing=plan.sync_pitch, gap_mm=round(min(c["value"] for c in plan.checks if c["name"] == "copy_gap"), 2)
@@ -402,7 +409,12 @@ class Handler(BaseHTTPRequestHandler):
                     count = int((f.get("count", (None, b"40"))[1] or b"40").decode())
                 except ValueError:
                     return self.send_json(dict(error="Copies must be a whole number."), 400)
-                job, result = self.app.plan(mname, mbytes, pbytes, count)
+                mode = (f.get("mode", (None, b"farm"))[1] or b"farm").decode().strip()
+                if ex_id:
+                    mode = ex["mode_id"]
+                if mode not in ("farm", "copy"):
+                    return self.send_json(dict(error="This mode is coming soon."), 409)
+                job, result = self.app.plan(mname, mbytes, pbytes, count, mode)
                 return self.send_json(result)
             if path.startswith("/api/generate/"):
                 job, err = self.app.start_generate(path.rsplit("/", 1)[-1])

@@ -77,7 +77,8 @@ a.download { display: block; text-align: center; text-decoration: none; backgrou
 .ok-box { background: var(--ok-bg); color: var(--ok); border-radius: 10px; padding: 12px; font-weight: 600; }
 .facts { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; font-size: .9rem; color: var(--muted); margin: 10px 0; }
 .facts b { color: var(--ink); font-weight: 600; text-align: right; }
-.fine { color: var(--muted); font-size: .85rem; word-break: break-all; }
+.fine { color: var(--muted); font-size: .85rem; }
+.fine.hash { word-break: break-all; }
 .notes { padding: 6px 0 10px; }
 .notes ul { color: var(--muted); padding-left: 18px; }
 .foot { color: var(--muted); font-size: .85rem; padding: 18px 16px 32px; }
@@ -109,3 +110,6 @@ a.download { display: block; text-align: center; text-decoration: none; backgrou
 .copy-info .eff span { margin-top: 6px; }
 .copy-info .eff b { font-size: 1rem; }
 #bed polygon { cursor: pointer; }
+
+.modepick { margin: 0 0 14px 0; }
+.modepick .dis { color: var(--muted); }

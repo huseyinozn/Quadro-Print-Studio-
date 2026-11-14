@@ -45,7 +45,7 @@ def _jsonable(o):
 
 
 def _layout_opts(a):
-    o = LayoutOptions(count=a.count, preset=a.preset)
+    o = LayoutOptions(count=a.count, preset=a.preset, mode=getattr(a, "mode", "farm"))
     for k in ("sync_pitch", "cols_per_zone", "col_pitch", "row_pitch", "min_gap", "foundation_layers",
               "standby_temp", "travel_clearance", "max_segment", "park_margin"):
         v = getattr(a, k, None)
@@ -62,7 +62,9 @@ def _add_inputs(p, profile=True):
 
 
 def _add_layout(p):
-    p.add_argument("--count", type=int, default=40, help="number of identical copies (multiple of 4)")
+    p.add_argument("--mode", default="farm", choices=["farm", "copy"],
+                   help="farm: identical copies on T0-T3 (count multiple of 4); copy: 2 copies on T0+T1, T2/T3 parked")
+    p.add_argument("--count", type=int, default=40, help="number of copies (farm: multiple of 4; copy: 2)")
     p.add_argument("--preset", default="reference-300", choices=list(PRESETS) + ["auto"])
     p.add_argument("--sync-pitch", dest="sync_pitch", type=float)
     p.add_argument("--cols-per-zone", dest="cols_per_zone", type=int)
@@ -197,7 +199,8 @@ def cmd_verify(a):
         return 2
     nozzle = prof.extruders[0].nozzle_diameter
     hlim = (0.2 * nozzle, 0.75 * nozzle)
-    sim = Sim(prof, model, "candidate", h_limits=hlim).run(a.gcode, a.foundation_layers)
+    heads = [0, 1] if a.mode == "copy" else [0, 1, 2, 3]
+    sim = Sim(prof, model, "candidate", h_limits=hlim, heads=heads).run(a.gcode, a.foundation_layers)
     res = analyse(sim, expected_count=a.count, min_gap=a.min_gap)
     out = dict(stage="verify", candidate=os.path.basename(a.gcode), candidate_sha256=_sha(a.gcode),
                slice_sha256=_sha(a.slice), profile_fingerprint=prof.fingerprint, tolerances=TOL,
@@ -206,7 +209,7 @@ def cmd_verify(a):
                                                                      res["copies_complete"], a.count, time.time() - t0))
     if a.oracle:
         t1 = time.time()
-        osim = Sim(prof, model, "oracle", h_limits=hlim).run(a.oracle, a.foundation_layers)
+        osim = Sim(prof, model, "oracle", h_limits=hlim, heads=heads).run(a.oracle, a.foundation_layers)
         ores = analyse(osim, expected_count=a.count, min_gap=a.min_gap)
         cmp_ = compare(sim, osim, a.foundation_layers)
         out["oracle"] = os.path.basename(a.oracle)
@@ -265,6 +268,7 @@ def main(argv=None):
     p = sub.add_parser("verify", help="independently simulate and check generated G-code (optionally against an oracle)")
     _add_inputs(p)
     p.add_argument("--gcode", required=True)
+    p.add_argument("--mode", default="farm", choices=["farm", "copy"])
     p.add_argument("--count", type=int, default=40)
     p.add_argument("--foundation-layers", dest="foundation_layers", type=int, default=5)
     p.add_argument("--min-gap", dest="min_gap", type=float, default=2.0)

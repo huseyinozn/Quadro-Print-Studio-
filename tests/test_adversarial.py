@@ -226,3 +226,83 @@ class PlannerAdversarial(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CopyModeAdversarial(unittest.TestCase):
+    """Copy Mode (T0 left, T1 right, T2/T3 parked): verifier rejects wrong files."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.slice = synth.write(os.path.join(cls.tmp, "box.gcode"), layers=9)
+        cls.prof, _ = load_profile(synth_profile.build(os.path.join(cls.tmp, "p.zip")))
+        cls.model, _ = load_slice(cls.slice)
+        plan, d = make_plan(cls.model, cls.prof, LayoutOptions(mode="copy", count=2, preset="auto"))
+        assert d.ok(), d.render()
+        cls.plan = plan
+        cls.text, _ = generate(cls.model, cls.prof, plan)
+        cls.lines = cls.text.split("\n")
+
+    def run_text(self, text):
+        p = os.path.join(self.tmp, "c.gcode")
+        with open(p, "w") as f:
+            f.write(text)
+        sim = Sim(self.prof, self.model, "copy", heads=[0, 1]).run(p, 5)
+        return analyse(sim, expected_count=2, min_gap=2.0)
+
+    def visit_range(self, layer, tools):
+        a = next(i for i, l in enumerate(self.lines) if l.startswith("; FARM_PART layer=%d slot=0 tools=%s" % (layer, tools)))
+        b = next(i for i in range(a + 1, len(self.lines)) if self.lines[i].startswith(("; FARM_TRANSFER", "; FARM_PARK", "M400")))
+        return a, b
+
+    def test_baseline_passes(self):
+        res = self.run_text(self.text)
+        self.assertTrue(res["passed"], res["issues"][:5])
+        self.assertEqual(res["copies_complete"], 2)
+        self.assertEqual(res["synchronized_from_layer"], 6)
+        self.assertTrue(res["parked_heads"]["stayed_parked"])
+        self.assertEqual(res["foundation_head_sequence"], [0, 1])
+
+    def test_count_rule_is_not_farm_rule(self):
+        plan, d = make_plan(self.model, self.prof, LayoutOptions(mode="copy", count=2, preset="auto"))
+        self.assertTrue(d.ok())
+        plan, d = make_plan(self.model, self.prof, LayoutOptions(mode="copy", count=4, preset="auto"))
+        self.assertIn("Copy Mode prints exactly 2 copies", d.render())
+
+    def test_third_head_synchronised_by_mistake_rejected(self):
+        i = next(k for k, l in enumerate(self.lines) if l == "SYNC_EXTRUDER_MOTION EXTRUDER=extruder1 MOTION_QUEUE=extruder")
+        bad = self.lines[:i + 1] + ["SET_DUAL_CARRIAGE CARRIAGE=carriage_t2 MODE=COPY",
+                                    "SYNC_EXTRUDER_MOTION EXTRUDER=extruder2 MOTION_QUEUE=extruder"] + self.lines[i + 1:]
+        res = self.run_text("\n".join(bad))
+        self.assertFalse(res["passed"])
+        self.assertIn("PARKED_HEAD_ACTIVE", res["issue_counts"])
+        self.assertFalse(res["parked_heads"]["stayed_parked"])
+
+    def test_parked_head_moved_rejected(self):
+        bad = [l.replace("T2=412.75000", "T2=380.00000", 1) if l.startswith("QUADRO_PARALLEL_MOVE T0=130") or
+               (l.startswith("QUADRO_PARALLEL_MOVE") and "copy" in l) else l for l in self.lines]
+        k = next(i for i, l in enumerate(self.lines) if l.startswith("; FARM_PARK copy-entry")) + 1
+        bad = list(self.lines)
+        bad[k] = bad[k].replace("T2=412.75000", "T2=380.00000")
+        res = self.run_text("\n".join(bad))
+        self.assertIn("PARKED_HEAD_MOVED", res["issue_counts"])
+
+    def test_skipped_foundation_layer_of_one_copy_rejected(self):
+        a, b = self.visit_range(3, "1")
+        res = self.run_text("\n".join(self.lines[:a] + self.lines[b:]))
+        self.assertFalse(res["passed"])
+        self.assertIn("COPY_INCOMPLETE", res["issue_counts"])
+
+    def test_skipped_synchronised_layer_rejected(self):
+        a, b = self.visit_range(7, "0,1")
+        res = self.run_text("\n".join(self.lines[:a] + self.lines[b:]))
+        self.assertFalse(res["passed"])
+        self.assertIn("COPY_INCOMPLETE", res["issue_counts"])
+
+    def test_late_copy_entry_rejected(self):
+        # T1 is not taken into COPY: layer 6+ printed by T0 alone
+        bad = [l for l in self.lines if l not in ("SET_DUAL_CARRIAGE CARRIAGE=carriage_t1 MODE=COPY",
+                                                  "SYNC_EXTRUDER_MOTION EXTRUDER=extruder1 MOTION_QUEUE=extruder")]
+        res = self.run_text("\n".join(bad))
+        self.assertFalse(res["passed"])
+        self.assertIn("COPY_PHASE", res["issue_counts"])

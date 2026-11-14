@@ -26,7 +26,8 @@ PLAIN = {
     "SLICE_RETRACTION": "The G-code's retraction amounts do not balance.",
     "SLICE_ENCODING": "The model file is not a text G-code file.",
     "SLICE_EMPTY": "The G-code contains no printable layers.",
-    "PLAN_COUNT": "Choose a number of copies that is a multiple of 4 (one copy per head per group).",
+    "PLAN_COUNT": "Farm Mode needs a multiple of 4 copies (one copy per head per group); Copy Mode prints exactly 2.",
+    "PLAN_PARKED_HEADS_CLEAR": "The printing heads would come too close to the parked heads.",
     "PLAN_DOES_NOT_FIT": "That many copies of this model do not fit on the measured bed area.",
     "PLAN_BED_BOUNDS": "Some copies would extend beyond the printable area.",
     "PLAN_MESH_COVERAGE": "Some copies would lie outside the measured bed mesh.",
@@ -41,6 +42,10 @@ PLAIN = {
 }
 
 VERIFY_PLAIN = {
+    "COPY_PHASE": "The heads do not switch to printing together exactly after the first layers, or the wrong heads print together.",
+    "PARKED_HEAD_MOVED": "A head that should stay parked is moved during the print.",
+    "PARKED_HEAD_ACTIVE": "A head that should stay parked is made active or synchronised.",
+    "FOUNDATION_ORDER": "The heads do not print their first layers one after another in the expected order.",
     "VISIT_MISMATCH": "Some model moves of a copy were missing or changed.",
     "COPY_COUNT": "The number of complete copies is not what was requested.",
     "COPY_INCOMPLETE": "A copy is missing a layer or a layer was printed twice.",
@@ -129,5 +134,9 @@ def verify_summary(res, exit_code):
         copies_complete=res.get("copies_complete"), copies_found=res.get("copies_found"),
         min_gap_mm=res.get("min_gap_between_copies"),
         first_layer_max_dev_mm=st.get("first_layer_max_dev"), min_transfer_clearance_mm=st.get("min_transfer_clear"),
-        min_carriage_gap_mm=st.get("min_carriage_gap"), final_parked=fs.get("carriages_parked"),
-        heaters_off=fs.get("heaters_off"), problems=probs)
+        min_carriage_gap_mm=st.get("min_carriage_gap"), min_sync_head_gap_mm=st.get("min_synchronized_head_gap"), final_parked=fs.get("carriages_parked"),
+        heaters_off=fs.get("heaters_off"), problems=probs,
+        layers_per_copy=sorted((res.get("layers_per_copy") or {}).values()),
+        synchronized_from_layer=res.get("synchronized_from_layer"),
+        parked_heads=(res.get("parked_heads") or {}).get("heads"),
+        parked_heads_stayed=(res.get("parked_heads") or {}).get("stayed_parked"))
