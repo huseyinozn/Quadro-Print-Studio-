@@ -67,6 +67,7 @@ class DualOptions:
     lift_feed: float = 1000.0
     descend_feed: float = 600.0
     outlier_threshold: float = 0.25
+    sink_tolerance: float = 0.03        # mm, nozzle below other material (same as verifier inpart_sink)
     preset: str = "auto"
 
 
@@ -175,6 +176,20 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
     plan.heads = [0, 1, 2, 3]
     plan.colours = dual.colours
 
+    # ---- colour mapping ------------------------------------------------------------------------
+    rr = getattr(dual, "right_replaced", None)
+    if getattr(dual, "right_source", "slice") == "left":
+        lay = sorted({x["layer"] for k in ("colour1", "colour2") for x in (rr or {}).get(k, [])})
+        plan.colour_mapping = dict(source="left model T0 (colour 1) and T2 (colour 2)", right="copy of the left regions",
+                                   slice_right_differed_on_layers=lay)
+        check("colour_mapping", True,
+              "Colour mapping: left T0 = colour 1, T2 = colour 2; right T1 = copy of T0's regions, T3 = copy of T2's regions "
+              "(built-in example: the slice's own right-model painting differed on %d layers and is not used)." % len(lay))
+    else:
+        plan.colour_mapping = dict(source="slice", right="the slice's right model (verified equal to the left model's regions)")
+        check("colour_mapping", True, "Colour mapping: left T0 = colour 1, T2 = colour 2; right T1 = colour 1, T3 = colour 2; "
+                                      "the right model's regions match the left model's on every layer.")
+
     # ---- pair consistency (the reason a profile may be refused) ---------------------------
     a_z, b_z = offs[2][2] - offs[0][2], offs[3][2] - offs[1][2]
     e_z = a_z - b_z
@@ -184,10 +199,12 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
     hmin, hmax = o["h_min_ratio"] * nozzle, o["h_max_ratio"] * nozzle
     plan.pair_z = dict(T2_minus_T0=round(a_z, 5), T3_minus_T1=round(b_z, 5), mismatch=round(e_z, 5), residual=round(r_z, 5),
                        boundary_thickness=[round(h - r_z, 4), round(h + r_z, 4)], limits=[hmin, hmax])
-    check("pair_z_consistency", h - r_z >= hmin - 1e-9 and h + r_z <= hmax + 1e-9,
-          "Z offsets: T2-T0 = %+.4f mm but T3-T1 = %+.4f mm (difference %.4f mm). With one shared Z per pair the two colours of "
-          "each model end up %.4f mm apart, so a layer that changes colour is %.3f-%.3f mm thick (allowed %.3f-%.3f mm)."
-          % (a_z, b_z, abs(e_z), r_z, h - r_z, h + r_z, hmin, hmax))
+    plan.z_analysis = None          # filled after placement (needs the layout)
+    plan._z_text = ("Z offsets: T2-T0 = %+.4f mm but T3-T1 = %+.4f mm (difference %.4f mm). With one shared Z per pair the two "
+                    "colours of each model end up %.4f mm apart (left: colour 2 %s, right: colour 2 %s), so a layer that changes "
+                    "colour could be %.3f-%.3f mm thick (allowed %.3f-%.3f mm)."
+                    % (a_z, b_z, abs(e_z), r_z, "lower" if plan.dstar - a_z < 0 else "higher",
+                       "lower" if plan.dstar - b_z < 0 else "higher", h - r_z, h + r_z, hmin, hmax))
     a_y, b_y = offs[2][1] - offs[0][1], offs[3][1] - offs[1][1]
     k = a_y - b_y
     r_y = abs(k) / 2.0
@@ -197,7 +214,8 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
                        limit=o["registration_limit"])
     check("pair_y_registration", r_y <= o["registration_limit"] + 1e-9,
           "Y offsets: T2-T0 = %+.4f mm but T3-T1 = %+.4f mm (difference %.4f mm). Both pairs share Y, so the two colours of each model "
-          "would be shifted %.3f mm against each other (allowed %.3f mm)." % (a_y, b_y, abs(k), r_y, o["registration_limit"]))
+          "would be shifted %.3f mm against each other (allowed %.3f mm). This is separate from Z: matching the heights "
+          "does not remove it." % (a_y, b_y, abs(k), r_y, o["registration_limit"]))
 
     # ---- placement -----------------------------------------------------------------------------
     fx0, fy0, fx1, fy1 = [min(a, b) for a, b in zip(m0.bbox_extrude[:2], m2.bbox_extrude[:2])] + \
@@ -323,6 +341,29 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
                 plan.affected_by_outliers.append(dict(point=[ol["x"], ol["y"]], point_z=ol["z"], deviation=ol["deviation"],
                                                       copy="T%d/slot0" % t, tool=t, slot=0, first_layer_dz_max=round(d1, 4),
                                                       foundation_top_dz_max=round(dF, 4), effect="calculated effect"))
+    # ---- Z residual: does it actually matter in THIS model? (replayed over the real geometry) -------
+    if r_z > 1e-6:
+        from .dualz import analyse_z
+        za = analyse_z(dual, plan, (hmin, hmax), sink_tol=o["sink_tolerance"])
+        plan.z_analysis = za
+        parts = []
+        for side, v in za["sides"].items():
+            st = v["stats"]
+            ci, ce = st["colour_change_interior"], st["colour_change_edge"]
+            parts.append("%s model: colour changes %d cells out of limits (layers %s)%s; nozzle sinks into the other colour at %d "
+                         "points (max %.3f mm); %d travels drag through it" % (
+                             side, ci["out_of_limits"] + ce["out_of_limits"], ", ".join((ci["layers"] + ce["layers"])[:6]) or "-",
+                             (", e.g. layer %d %s at (%.2f, %.2f): %.3f mm on %s" % (
+                                 v["examples"]["colour_change_interior"][0]["layer"], v["examples"]["colour_change_interior"][0]["head"],
+                                 v["examples"]["colour_change_interior"][0]["x"], v["examples"]["colour_change_interior"][0]["y"],
+                                 v["examples"]["colour_change_interior"][0]["thickness"], v["examples"]["colour_change_interior"][0]["below"])
+                              if v["examples"]["colour_change_interior"] else ""),
+                             st["sink_extrude"]["points"], st["sink_extrude"]["max_depth"], st["sink_travel"]["moves"]))
+        check("pair_z_consistency", not za["blocking"],
+              plan._z_text + " In this model: " + "; ".join(parts) + ".")
+    else:
+        check("pair_z_consistency", True, plan._z_text + " No residual.")
+
     plan.validated_scope = "Dual Color Copy Mode: software checks only, no physical print evidence for this file"
     plan.sync_pitch = spacing
     plan.profile_summary = prof.summary()

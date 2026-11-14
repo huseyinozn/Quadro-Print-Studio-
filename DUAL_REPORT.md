@@ -1,5 +1,48 @@
 # Dual Color Copy Mode (milestone 4): results
 
+## Review round 2: Two-Color Fidgets example from the left model, Z and Y reported separately
+
+### Result: real fidget + current profile
+
+**Refused.** No G-code is written and download stays blocked. There are two independent blockers, Z and Y. Colour mapping is OK.
+
+| Topic | Status | Criterion | Where |
+|---|---|---|---|
+| Colour mapping | OK | The left model's T0 (colour 1) and T2 (colour 2) regions are the only source. T1 prints a copy of T0's regions and T3 a copy of T2's regions. Layers 1–3 use the same source geometry with each head's own current mesh and offsets. From layer 4, T1 follows T0 and T3 follows T2 in COPY. The verifier confirms that each head reproduces its colour region on 100/100 layers. | The slice's own right-model painting differed on 33 layers. For the built-in example it is replaced, and this is reported as replaced. |
+| Height (Z) | **Blocked** | Layer thickness between consecutive layers must stay within 0.080–0.300 mm. A nozzle may not be more than 0.03 mm below material of the other colour (the same 0.03 mm as the verifier's existing `inpart_sink`). | See the table below. The problem is real in this model, not only possible. |
+| Colour alignment (Y) | **Blocked** | The two colours of one model may be at most 0.100 mm apart. | 0.209 mm on both models, everywhere. Matching Z does not fix this. |
+
+**Z is a real problem in this model.** I replayed the planned nozzle heights over the real geometry, layer by layer in print order (T0, T1, T2, T3, then pair A, then pair B), on a 0.1 mm height map per model. Bead footprint = half the line width; nozzle opening radius = 0.2 mm. On the left model colour 2 sits 0.119 mm below colour 1; on the right model it sits 0.119 mm above.
+
+| Model | Finding | Count | Layers | Example (layer · head · physical X, Y · what is below or beside) |
+|---|---|---|---|---|
+| left | colour 1 on colour 2 from one layer to the next | 493 cells out of limits (of 679) | 14–17, 19–23, 31, 61–71, 81–88 | 14 · T0 · (129.54, 179.21) · 0.318 mm on colour 2 (T2) of layer 13 |
+| left | bead edge at a colour border (colour 1 printed first, its edge lies on colour 2 of the layer below) | 21 676 cells out of limits | 3–100 | 4 · T0 · (134.02, 179.41) · 0.318 mm on colour 2 (T2) of layer 3 |
+| left | nozzle prints lower than colour 1 beside it (same layer, printed just before) | 22 874 points, max 0.119 mm | 2–100 | 3 · T2 · (133.82, 179.20) · 0.118 mm into colour 1 (T0) |
+| left | travel or wipe at layer height through colour 1 | 295 moves, max 0.119 mm | 2–6, 8, 14–20, 29–73, 76, 81–87 | 3 · T2 · (125.70, 179.20) · slicer line 2634 |
+| right | colour 2 on colour 1 from one layer to the next | 164 cells out of limits (of 701) | 12–16, 20–21, 31, 71, 81–83, 86–88 | 12 · T3 · (195.83, 133.40) · 0.319 mm on colour 1 (T1) of layer 11 |
+| right | bead edge at colour borders / nozzle lower than the colour beside it / travels | 0 / 0 / 0 | – | Colour 2 is higher here and printed after colour 1 |
+
+Over a gap of more than one layer (bridges, sparse infill below), the colour changes shift by ±0.119 mm against the slice's own gap. This is reported but not judged as a layer thickness.
+
+**The verifier finds the same problem independently.** For this check only, I generated a file anyway with the current profile. It was not delivered and must not be printed. The verifier rejects it with:
+
+* `COPY_THICKNESS` 1484 times, measured 0.117–0.281 mm;
+* `DESCENT_INTO_MATERIAL` (T2 descends 0.1195 mm into material);
+* `FOUNDATION_FLOW` in layers 2–3 (E against the measured thickness at colour borders);
+* `DUAL_REGISTRATION` 0.209 mm on both models.
+
+Colour regions are 100/100 on all four heads. The only blockers left are Z and Y.
+
+**Cross-check (test only, never offered):** the same real fidget with offsets that are consistent in Z and Y (T3 derived from T0, T1 and T2) generates and passes verification, with all four heads at 100/100 layers. The geometry and the pipeline are fine; the current offsets are what block it.
+
+**Own uploads are not changed.** If the same file is uploaded as the user's own model, the right model is **not** replaced. It is refused with `DUAL_NOT_COPYABLE`, and the region that differs is marked.
+
+Tolerances were not loosened, the profile was not changed and no recalibration was requested. The internal reference was only used for comparison: right paths = left paths shifted, layer 4+ in COPY, idle heads parked.
+
+---
+
+
 Two copies of a two-colour model. Each head always has the same job:
 
 | Head | Model | Colour | Layers 1–3 | From layer 4 |
@@ -51,7 +94,7 @@ To check that the verifier sees the real effect, a file was generated anyway wit
 | Copy preheat, very short wait (8 × 6 mm) | The whole wait is only 16.3 s, so heating starts at standby and `M109` waits for the rest. No cold extrusion. |
 | OrcaCube Copy output | Only change: the old fixed "preheat while T0 prints layer 5" line is replaced by `M104 T1 S220 ; preheat 17 s ahead`. |
 | Farm 40 Sharks | Byte-identical to the previous commit (SHA-256 9e113ffd…). |
-| Automated tests | 115 OK (21 new in `tests/test_dual.py`, web tests updated). |
+| Automated tests | 121 OK after round 2 (`tests/test_dual.py` 26 tests, web tests updated). |
 
 ### Verifier changes found during this work
 

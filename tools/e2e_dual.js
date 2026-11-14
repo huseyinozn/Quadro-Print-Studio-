@@ -39,7 +39,7 @@ const crypto = require("crypto");
   r.phases = await page.$$eval("#phases button", bs => bs.map(b => b.textContent));
   r.layers = await page.$$eval("#layer-pick button", bs => bs.map(b => b.textContent));
   r.region_paths = await page.$$eval("#bed path[data-head]", ps => ps.map(p => p.getAttribute("data-head")));
-  r.mapping = await page.$$eval("#mapping tbody tr", rs => rs.map(x => x.innerText.replace(/\s+/g, " ").trim()));
+  r.mapping = await page.$$eval("#mapping table.map tbody tr", rs => rs.map(x => x.innerText.replace(/\s+/g, " ").trim()));
   r.diff_marks = await page.$$eval("#bed rect[data-diff]", ps => ps.length);
   r.legend = await page.textContent("#legend");
   r.reject_visible = await page.isVisible("#reject-card");
@@ -54,13 +54,21 @@ const crypto = require("crypto");
   await page.locator("#layout-card").screenshot({ path: path.join(outDir, "04_pair_B.png") });
   if (how === "example") {
     r.problems = await page.$$eval("#problems li", ls => ls.map(l => l.innerText.replace(/\s+/g, " ").trim()));
-    r.why = await page.$$eval("#mapping .why", ls => ls.map(l => l.textContent));
+    r.why = await page.$$eval("#mapping .why, #mapping .okb", ls => ls.map(l => l.innerText.replace(/\s+/g, " ").trim()));
+    r.z_rows = await page.$$eval("#mapping table.zf tbody tr", rs => rs.length);
+    await page.locator("#mapping table.zf [data-goto]").first().click();
+    await page.waitForTimeout(300);
+    r.z_layer_shown = await page.textContent("#layer-pick button[aria-selected=true]");
+    r.z_markers = await page.$$eval("#bed circle[data-zfind]", cs => cs.length);
+    await page.locator("#layout-card").screenshot({ path: path.join(outDir, "06_z_finding_layer.png") });
+    await page.locator("#mapping").screenshot({ path: path.join(outDir, "07_mapping_z_y.png") });
     await page.locator("#reject-card").screenshot({ path: path.join(outDir, "05_refused_reasons.png") });
     const dl = await page.request.get(base + "/api/download/nonexistent");
     r.download_blocked_status = dl.status();
     r.ok = r.mode_dual_checked && !r.model_input_visible && r.reject_visible && !r.generate_visible
-      && r.region_paths.length === 4 && r.mapping.length === 4 && r.problems.some(p => p.includes("not coloured the same way"))
-      && r.problems.some(p => p.includes("Z tool offsets")) && r.diff_marks > 0;
+      && r.region_paths.length === 4 && r.mapping.length === 4 && !r.problems.some(p => p.includes("not coloured the same way"))
+      && r.problems.some(p => p.startsWith("Height (Z)")) && r.problems.some(p => p.startsWith("Colour alignment (Y)"))
+      && r.z_rows > 0 && r.z_markers > 0;
   } else {
     await page.click("#generate");
     await page.waitForSelector("#result-card:not(.hidden)", { timeout: 1800000 });

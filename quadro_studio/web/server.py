@@ -57,7 +57,7 @@ EXAMPLES = [
          file="orca_cube.gcode", image="/examples/orcacube.png",
          text="Two cubes at the same time: T0 prints the left one, T1 the right one. You only upload your printer profile."),
     dict(id="fidgets-2c", title="Two-Color Fidgets", mode="Dual Color Copy Mode", mode_id="dual", available=True, count=2,
-         file="two_color_fidget.gcode", image="/examples/fidgets.png",
+         file="two_color_fidget.gcode", image="/examples/fidgets.png", right_from_left=True,
          text="Two two-colour fidgets at once: T0 + T1 print colour 1 on both models together, then T2 + T3 colour 2. "
               "You only upload your printer profile."),
 ]
@@ -118,13 +118,13 @@ class App:
         self.post_generate_hook = post_generate_hook
 
     # ---------------------------------------------------------------- plan
-    def plan(self, slice_name, slice_bytes, profile_bytes, count, mode="farm"):
+    def plan(self, slice_name, slice_bytes, profile_bytes, count, mode="farm", right_from_left=False):
         if mode not in ("farm", "copy", "dual"):
             raise ValueError("unknown mode")
         if mode in ("copy", "dual"):
             count = 2
         ss, ps = sha256_bytes(slice_bytes), sha256_bytes(profile_bytes)
-        jid = sha256_bytes(("%s|%s|%d|%s|%s" % (ss, ps, count, mode, ENGINE)).encode())[:20]
+        jid = sha256_bytes(("%s|%s|%d|%s|%s|%s" % (ss, ps, count, mode, ENGINE, "rfl" if right_from_left else "")).encode())[:20]
         with self.lock:
             job = self.jobs.get(jid)
             if job is not None and job.state not in ("error",):
@@ -138,7 +138,7 @@ class App:
         with open(os.path.join(folder, "profile.zip"), "wb") as f:
             f.write(profile_bytes)
         job.inputs = dict(model=os.path.basename(slice_name or "model.gcode")[:120], model_sha256=ss, profile_sha256=ps,
-                          count=count, mode=mode)
+                          count=count, mode=mode, right_from_left=bool(right_from_left))
         if mode == "dual":
             return self._plan_dual(job, folder)
         diags = Diagnostics()
@@ -197,7 +197,8 @@ class App:
         diags = Diagnostics()
         result = dict(job_id=job.id, inputs=job.inputs)
         try:
-            dual, d1 = load_dual(os.path.join(folder, "model.gcode"), Diagnostics(), strict=False)
+            dual, d1 = load_dual(os.path.join(folder, "model.gcode"), Diagnostics(), strict=False,
+                                 right_from_left=job.inputs.get("right_from_left", False))
             diags.extend(d1)
             prof, d2 = load_profile(os.path.join(folder, "profile.zip"))
             diags.extend(d2)
@@ -257,7 +258,8 @@ class App:
                 os.remove(out)
             prof, _ = load_profile(os.path.join(folder, "profile.zip"))
             if job.inputs["mode"] == "dual":
-                dual, _ = load_dual(os.path.join(folder, "model.gcode"), strict=True)
+                dual, _ = load_dual(os.path.join(folder, "model.gcode"), strict=True,
+                                    right_from_left=job.inputs.get("right_from_left", False))
                 plan, d = make_dual_plan(dual, prof)
                 if plan is None or not d.ok():
                     raise RuntimeError("plan no longer valid")
@@ -281,6 +283,8 @@ class App:
             cmd = [sys.executable, "-m", "quadro_studio", "verify", "--mode", job.inputs["mode"], "--slice", os.path.join(folder, "model.gcode"),
                    "--profile", os.path.join(folder, "profile.zip"), "--gcode", out, "--count", str(job.inputs["count"]),
                    "--foundation-layers", str(plan.foundation_layers), "--min-gap", str(plan.options["min_gap"]), "--out", vjson]
+            if job.inputs.get("right_from_left"):
+                cmd.append("--right-from-left")
             env = dict(os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=self.verify_timeout, env=env)
             res = json.load(open(vjson))["candidate_result"] if os.path.exists(vjson) else None
@@ -377,7 +381,22 @@ def dual_layout_json(dual, prof, plan):
     slot = plan.slots[0]
     tr = {0: (0.0, 0.0), 2: (0.0, 0.0), 1: tuple(dual.translation), 3: tuple(dual.translation)}
     diffs = [d["layer"] for k in ("colour1", "colour2") for d in (dual.region_differences.get(k) or [])]
-    layers = sorted({1, F, F + 1, (n + 1) // 2, n} | ({diffs[0]} if diffs else set()))
+    za = getattr(plan, "z_analysis", None)
+    zl = set()
+    zfind = []
+    ztable = []
+    if za:
+        for side, v in za["sides"].items():
+            for kind, lst in v["examples"].items():
+                for it in lst:
+                    zfind.append(dict(it, kind=kind))
+        # table: per model and kind the first two located findings (their layers get a preview)
+        for kind in ("colour_change_interior", "sink_extrude", "sink_travel"):
+            for side, v in za["sides"].items():
+                for it in v["examples"][kind][:2]:
+                    ztable.append(dict(it, kind=kind))
+                    zl.add(it["layer"])
+    layers = sorted({1, F, F + 1, (n + 1) // 2, n} | ({diffs[0]} if diffs else set()) | zl)
     layers = [L for L in layers if 1 <= L <= n]
 
     def phys(t, x, y):
@@ -422,6 +441,10 @@ def dual_layout_json(dual, prof, plan):
         purge=[dict(head=t, x0=plan.purge[t]["x0"], x1=plan.purge[t]["x1"], y=plan.purge[t]["y"]) for t in range(4)],
         purge_width=plan.purge["width_est"], region_marks=marks,
         pair_z=plan.pair_z, pair_y=plan.pair_y, spacing=round(plan.spacing, 2),
+        colour_mapping=getattr(plan, "colour_mapping", None),
+        z_findings=zfind, z_table=ztable, z_blocking=(za or {}).get("blocking", []),
+        z_summary={side: {k: {kk: vv for kk, vv in st.items()} for k, st in v["stats"].items()}
+                   for side, v in (za or {}).get("sides", {}).items()},
         deviating_points=[dict(x=p["x"], y=p["y"], z=p["z"], deviation=p["deviation"], neighbour_median=p["neighbour_median"])
                           for p in plan.mesh_deviating_points],
         mesh_effects=effects, mesh_affected=sorted(effects),
@@ -472,7 +495,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/app.js", "/style.css"):
             return self.static(path[1:], "application/javascript" if path.endswith(".js") else "text/css")
         if path == "/api/examples":
-            return self.send_json([{k: v for k, v in e.items() if k != "file"} for e in EXAMPLES])
+            return self.send_json([{k: v for k, v in e.items() if k not in ("file", "right_from_left")} for e in EXAMPLES])
         if path.startswith("/examples/") and path.endswith(".png"):
             name = os.path.basename(path)
             if name in {os.path.basename(e["image"]) for e in EXAMPLES}:
@@ -542,7 +565,8 @@ class Handler(BaseHTTPRequestHandler):
                     mode = ex["mode_id"]
                 if mode not in ("farm", "copy", "dual"):
                     return self.send_json(dict(error="Unknown mode."), 409)
-                job, result = self.app.plan(mname, mbytes, pbytes, count, mode)
+                job, result = self.app.plan(mname, mbytes, pbytes, count, mode,
+                                            right_from_left=bool(ex_id and ex.get("right_from_left")))
                 return self.send_json(result)
             if path.startswith("/api/generate/"):
                 job, err = self.app.start_generate(path.rsplit("/", 1)[-1])

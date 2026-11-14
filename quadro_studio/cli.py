@@ -76,6 +76,8 @@ def _add_layout(p):
     p.add_argument("--standby-temp", dest="standby_temp", type=float)
     p.add_argument("--travel-clearance", dest="travel_clearance", type=float)
     p.add_argument("--max-segment", dest="max_segment", type=float)
+    p.add_argument("--right-from-left", dest="right_from_left", action="store_true",
+                   help="dual, built-in example only: build the right copy from the left model's T0/T2 regions")
     p.add_argument("--park-margin", dest="park_margin", type=float,
                    help="extra mm above the minimum carriage clearance for stacked parks (default 0 = reference parity)")
 
@@ -146,7 +148,7 @@ def build_dual(a, diags, strict):
     """Dual Color Copy Mode inputs: 4-tool slice + profile -> (dual, prof, plan)."""
     from .dualslice import load_dual
     from .dualplan import make_dual_plan
-    dual, d1 = load_dual(a.slice, Diagnostics(), strict=strict)
+    dual, d1 = load_dual(a.slice, Diagnostics(), strict=strict, right_from_left=getattr(a, "right_from_left", False))
     diags.extend(d1)
     prof, d2 = load_profile(a.profile, a.mesh_profile)
     diags.extend(d2)
@@ -194,6 +196,7 @@ def cmd_plan_dual(a):
         dual, prof, plan = build_dual(a, diags, strict=False)
         out["plan"] = plan.as_json() if plan is not None else None
         out["region_differences"] = dual.region_differences
+        out["right_replaced"] = getattr(dual, "right_replaced", None)
     except StageError as e:
         diags = e.diags
     out["diagnostics"] = diags.as_list()
@@ -244,7 +247,7 @@ def cmd_verify_dual(a):
     from .verify import TOL
     from .verify_dual import verify_dual
     diags = Diagnostics()
-    dual, d1 = load_dual(a.slice, diags, strict=True)
+    dual, d1 = load_dual(a.slice, diags, strict=True, right_from_left=a.right_from_left)
     prof, d2 = load_profile(a.profile, a.mesh_profile)
     diags.extend(d2)
     profile_checks(prof, diags)
@@ -387,6 +390,8 @@ def main(argv=None):
     p.add_argument("--count", type=int, default=40)
     p.add_argument("--foundation-layers", dest="foundation_layers", type=int, default=None,
                    help="default 5 (farm/copy) or 3 (dual)")
+    p.add_argument("--right-from-left", dest="right_from_left", action="store_true",
+                   help="dual, built-in example only: right copy = left model's T0/T2 regions")
     p.add_argument("--min-gap", dest="min_gap", type=float, default=2.0)
     p.add_argument("--oracle", default=None, help="golden G-code used ONLY for comparison")
     p.add_argument("--out", default=None)

@@ -192,26 +192,43 @@ class WebExamplesAndMeshMarks(WebBase):
         self.assertEqual(r["layout"]["count"], 40)
         self.assertEqual(r["model"]["layers"], 83)
 
-    def test_fidget_example_refused_with_preview_and_reasons(self):
-        # the example's two models are coloured differently (and the synthetic profile's
-        # offsets are inconsistent): refused, but the head/region/model preview is shown
+    def test_fidget_example_right_copy_from_left_refused_by_z_and_y(self):
+        # the example's right copy is built from the left model's T0/T2 regions (colour mapping OK);
+        # the synthetic profile's offsets are inconsistent: refused for Z (with located findings) and Y
         st, r = self.plan_example("fidgets-2c")
         self.assertEqual(st, 200)
         self.assertEqual(r["state"], "rejected")
         codes = {p["code"] for p in r["problems"]}
-        self.assertIn("DUAL_NOT_COPYABLE", codes)
+        self.assertNotIn("DUAL_NOT_COPYABLE", codes)
         self.assertIn("PLAN_PAIR_Z_CONSISTENCY", codes)
+        self.assertIn("PLAN_PAIR_Y_REGISTRATION", codes)
         L = r["layout"]
         self.assertEqual(L["mode"], "dual")
+        self.assertTrue(next(c for c in L["checks"] if c["name"] == "colour_mapping")["ok"])
         self.assertEqual([(m["head"], m["model"], m["colour"]) for m in L["mapping"]],
                          [(0, "left", 1), (1, "right", 1), (2, "left", 2), (3, "right", 2)])
-        self.assertTrue(L["region_marks"])
+        self.assertEqual(L["region_marks"], [])
+        self.assertTrue(L["z_blocking"])
+        f = L["z_findings"][0]
+        for k in ("layer", "head", "x", "y", "kind"):
+            self.assertIn(k, f)
         for Lk, per in L["regions"].items():
             self.assertEqual(sorted(per), ["0", "1", "2", "3"])
         st, _, _ = self.req("/api/generate/" + r["job_id"], b"", "application/octet-stream", "POST")
         self.assertEqual(st, 409)
         st, _, _ = self.req("/api/download/" + r["job_id"])
         self.assertEqual(st, 403)
+
+    def test_own_upload_of_differently_coloured_models_not_changed(self):
+        # the same file uploaded as the user's own model: its right model is NOT silently replaced
+        from quadro_studio.web.server import EXAMPLE_DIR
+        fid = open(os.path.join(EXAMPLE_DIR, "two_color_fidget.gcode"), "rb").read()
+        body, ct = multipart({"profile": ("p.zip", self.profile), "model": ("mine.gcode", fid), "mode": (None, "dual"), "count": (None, "2")})
+        st, data, _ = self.req("/api/plan", body, ct)
+        r = json.loads(data)
+        self.assertEqual(r["state"], "rejected")
+        self.assertIn("DUAL_NOT_COPYABLE", {p["code"] for p in r["problems"]})
+        self.assertTrue(r["layout"]["region_marks"])
 
     def test_marks_equal_planner_list(self):
         from quadro_studio.slicer import load_slice

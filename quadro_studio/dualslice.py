@@ -385,9 +385,35 @@ def compare_regions(a, b, diags, label, res=0.25, max_mismatch=0.005, max_e=0.01
     return (d, worst), []
 
 
-def load_dual(path, diags=None, strict=True):
+def load_dual(path, diags=None, strict=True, right_from_left=False):
     """strict=False returns the parsed input even when the regions do not
-    correspond (errors stay in diags) so a preview can show where they differ."""
+    correspond (errors stay in diags) so a preview can show where they differ.
+
+    right_from_left=True (built-in example only, never for a user's own file):
+    the LEFT model's T0 and T2 regions are the single source; the right copy is
+    made from them (as the successful reference print did: right paths = left
+    paths translated, layer 4+ by COPY). The slice's own right-model regions are
+    compared and the differences reported as replaced, not as an error."""
+    if right_from_left:
+        d0 = Diagnostics()
+        ds, dd = load_dual(path, d0, strict=False)
+        for x in dd.items:
+            if x.code != "DUAL_NOT_COPYABLE":
+                (diags or Diagnostics()).items.append(x) if diags is not None else None
+        hard = [x for x in dd.errors if x.code != "DUAL_NOT_COPYABLE"]
+        if hard:
+            d1 = diags or Diagnostics()
+            if diags is None:
+                d1.items.extend(hard)
+            raise StageError(d1)
+        ds.right_replaced = ds.region_differences
+        ds.region_differences = dict(colour1=[], colour2=[])
+        ds.slice_translation = tuple(ds.translation)
+        ds.models = {0: ds.models[0], 1: ds.models[0], 2: ds.models[2], 3: ds.models[2]}
+        ds.translation = (0.0, 0.0)
+        ds.right_source = "left"
+        ds.stats = dict(ds.stats, right_source="left model T0/T2 regions (example)", copy_max_dev=0.0)
+        return ds, (diags or Diagnostics())
     diags = diags or Diagnostics()
     sp = split_tools(path, diags)
     cfg = sp["cfg"]
@@ -449,4 +475,6 @@ def load_dual(path, diags=None, strict=True):
                  copy_translation=[round(ra[0][0], 4), round(ra[0][1], 4)], copy_max_dev=max(ra[1], rb[1]))
     ds = DualSlice(path, models, colours, preheat, delta, ra[0], cfg, sp["order"], stats)
     ds.region_differences = region_differences
+    ds.right_replaced = None
+    ds.right_source = "slice"
     return ds, diags

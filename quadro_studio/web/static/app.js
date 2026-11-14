@@ -341,7 +341,8 @@
     drawDual(L);
     $("legend").innerHTML = L.mapping.map(r => `<span><i style="background:${L.colours[r.head]}"></i>${HEADS[r.head]}: ${MODEL[r.model].toLowerCase()}, colour ${r.colour}</span>`).join("") +
       `<span><i style="background:transparent;border:2px solid var(--ink)"></i>Wipe tower (10 × 10 mm) per head</span>` +
-      (L.region_marks.length ? `<span><i style="background:transparent;border:2px dashed var(--bad)"></i>Region that differs between the two models</span>` : "");
+      (L.region_marks.length ? `<span><i style="background:transparent;border:2px dashed var(--bad)"></i>Region that differs between the two models</span>` : "") +
+      ((L.z_findings || []).length ? `<span><i style="background:transparent;border:2px solid var(--bad);border-radius:50%"></i>Height problem on the shown layer</span>` : "");
     const w = $("warnings");
     w.innerHTML = "";
     for (const x of res.warnings || []) {
@@ -352,13 +353,40 @@
     }
     const mp = $("mapping");
     mp.classList.remove("hidden");
-    const why = (L.checks.filter(c => !c.ok).map(c => `<div class="why">✗ ${escapeHtml(c.detail)}</div>`).join(""));
-    mp.innerHTML = `<table><thead><tr><th>Head</th><th>Model</th><th>Colour</th><th>Layers 1–${F}</th><th>From layer ${F + 1}</th></tr></thead><tbody>` +
+    const chk = (n) => L.checks.find(c => c.name === n) || { ok: true, detail: "" };
+    const KIND = { colour_change_interior: "colour changes from one layer to the next",
+                   colour_change_edge: "bead edge on the other colour at a colour border",
+                   sink_extrude: "nozzle prints lower than the other colour beside it",
+                   sink_travel: "travel/wipe at layer height through the other colour" };
+    let zHtml = "";
+    if (L.z_summary && Object.keys(L.z_summary).length) {
+      zHtml = Object.entries(L.z_summary).map(([side, st]) => {
+        const ci = st.colour_change_interior, ce = st.colour_change_edge;
+        return `<li><b>${MODEL[side]}</b>: colour changes ${ci.out_of_limits + ce.out_of_limits} cells outside ${L.pair_z.limits.map(v => v.toFixed(2)).join("–")} mm
+          (from one layer to the next: ${ci.out_of_limits}${ci.layers.length ? ", layers " + ci.layers.slice(0, 6).join(", ") : ""}; at colour borders: ${ce.out_of_limits});
+          nozzle lower than the colour beside it: ${st.sink_extrude.points} points (max ${st.sink_extrude.max_depth.toFixed(3)} mm);
+          travels through the other colour: ${st.sink_travel.moves}</li>`;
+      }).join("");
+      const ex = L.z_table || [];
+      zHtml = `<ul class="zsum">${zHtml}</ul>` + (ex.length ? `<table class="zf"><thead><tr><th>Layer</th><th>Head · model</th><th>X, Y (mm)</th><th>What</th></tr></thead><tbody>` +
+        ex.map(f => `<tr data-layer="${f.layer}"><td><button type="button" class="lnk" data-goto="${f.layer}">${f.layer}</button></td><td>${f.head} · ${f.model}</td><td>${f.x}, ${f.y}</td><td>${KIND[f.kind]}: ${f.thickness !== undefined ? f.thickness.toFixed(3) + " mm thick on " + escapeHtml(f.below) : f.depth.toFixed(3) + " mm into " + escapeHtml(f.beside || f.over)}</td></tr>`).join("") + `</tbody></table>` : "");
+    }
+    const cm = chk("colour_mapping"), cz = chk("pair_z_consistency"), cy = chk("pair_y_registration");
+    const sec = (title, c, extra) => `<div class="${c.ok ? "okb" : "why"}"><b>${c.ok ? "✓" : "✗"} ${title}</b><div>${escapeHtml(c.detail.split(" In this model:")[0])}</div>${extra || ""}</div>`;
+    const why = sec("Colour mapping", cm) + sec("Height (Z)", cz, zHtml) + sec("Colour alignment (Y)", cy) +
+      L.checks.filter(c => !c.ok && !["colour_mapping", "pair_z_consistency", "pair_y_registration"].includes(c.name))
+        .map(c => `<div class="why">✗ ${escapeHtml(c.detail)}</div>`).join("");
+    mp.innerHTML = `<table class="map"><thead><tr><th>Head</th><th>Model</th><th>Colour</th><th>Layers 1–${F}</th><th>From layer ${F + 1}</th></tr></thead><tbody>` +
       L.mapping.map(r => `<tr data-head="${r.head}"><td>${HEADS[r.head]}</td><td>${MODEL[r.model]}</td><td><span class="sw" style="background:${L.colours[r.head]}"></span>${r.colour}</td><td>alone</td><td>with ${r.pair.replace("T" + r.head, "").replace(" + ", "").trim()} (pair ${r.pair})</td></tr>`).join("") +
       `</tbody></table>` +
       `<p class="fine">Order on every layer from ${F + 1}: T0 + T1 print colour 1 on both models, park, then T2 + T3 print colour 2. Each head starts every layer on its own wipe tower.</p>` + why;
     $("checklist").innerHTML = L.checks.map(c => `<li>${c.ok ? "✓" : "✗"} ${escapeHtml(c.detail)}</li>`).join("");
     $("copy-info").textContent = "Tap a coloured region to see which head prints it.";
+    for (const b of mp.querySelectorAll("[data-goto]")) b.addEventListener("click", () => {
+      pLayer = parseInt(b.dataset.goto, 10);
+      if (!L.preview_layers.includes(pLayer)) pLayer = L.preview_layers[0];
+      phase = "all"; drawDual(L); $("bed").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
   }
 
   function drawDual(L) {
@@ -400,6 +428,11 @@
       const h = L.hulls[side === "left" ? 0 : 1];
       const cx = h.reduce((a, p) => a + p[0], 0) / h.length, top = Math.max(...h.map(p => p[1]));
       el("text", { x: cx, y: Y(top) - 3, "font-size": 4.2, "text-anchor": "middle", fill: "var(--muted)" }, svg).textContent = MODEL[side] + (side === "left" ? " · T0 / T2" : " · T1 / T3");
+    }
+    for (const f of (L.z_findings || [])) {
+      if (f.layer !== pLayer || f.kind === "colour_change_edge") continue;
+      const c = el("circle", { cx: f.x, cy: Y(f.y), r: 1.6, fill: "none", stroke: "var(--bad)", "stroke-width": 0.5, "data-zfind": f.kind, "pointer-events": "none" }, svg);
+      el("title", {}, c).textContent = `Layer ${f.layer} ${f.head} (${f.x}, ${f.y})`;
     }
     for (const mk of L.region_marks) {
       if (!mk.layers.includes(pLayer)) continue;

@@ -125,6 +125,62 @@ class DualMode(unittest.TestCase):
         self.assertIn("PLAN_PAIR_Z_CONSISTENCY", codes)
         self.assertIn("PLAN_PAIR_Y_REGISTRATION", codes)
 
+    def test_z_residual_located_in_this_model(self):
+        plan, d = make_dual_plan(self.dual, self.bad_prof)
+        za = plan.z_analysis
+        self.assertIsNotNone(za)
+        self.assertIn("colour_change_thickness", za["blocking"])
+        # colours swap halves every 10 layers: the vertical colour change is at layer 11
+        layers = set()
+        for side in ("left", "right"):
+            for it in za["sides"][side]["examples"]["colour_change_interior"]:
+                layers.add(it["layer"])
+                self.assertIn("below", it)
+                self.assertTrue(it["thickness"] < 0.08 or it["thickness"] > 0.30)
+        self.assertEqual(layers, {11})
+        # one side's colour 2 is lower: its nozzle runs into colour 1 beside it
+        sinks = [za["sides"][s]["stats"]["sink_extrude"]["points"] for s in ("left", "right")]
+        self.assertTrue(any(sinks))
+        detail = next(c for c in plan.checks if c["name"] == "pair_z_consistency")["detail"]
+        self.assertIn("In this model", detail)
+
+    def test_z_lattice_matches_planned_heights(self):
+        from quadro_studio.dualz import _Lattice
+        import numpy as np
+        plan, _ = make_dual_plan(self.dual, self.bad_prof)
+        m = self.dual.models[0]
+        lat = _Lattice(plan, m.bbox_motion[0] - 2, m.bbox_motion[1] - 2, m.bbox_motion[2] + 2, m.bbox_motion[3] + 2)
+        sl = plan.slots[0]
+        for t in range(4):
+            for L in (1, 2, 3, 4, 9):
+                for (x, y) in ((m.bbox_extrude[0] + 1.3, m.bbox_extrude[1] + 2.1), (m.bbox_extrude[2] - 0.7, m.bbox_extrude[3] - 3.3)):
+                    ref = plan.zbase(L, t if L <= plan.foundation_layers else ("A" if t < 2 else "B"), x + sl.dx, y + sl.dy) - plan.offsets[t][2]
+                    self.assertAlmostEqual(float(lat.tip(t, L, np.array([x]), np.array([y]))[0]), ref, delta=2e-4)
+
+    def test_y_residual_reported_separately(self):
+        plan, d = make_dual_plan(self.dual, self.bad_prof)
+        y = next(c for c in plan.checks if c["name"] == "pair_y_registration")
+        self.assertFalse(y["ok"])
+        self.assertIn("separate from Z", y["detail"])
+        self.assertGreater(plan.pair_y["registration_error"], 0.10)
+
+    def test_consistent_offsets_no_z_findings(self):
+        self.assertIsNone(self.plan.z_analysis)
+        self.assertTrue(next(c for c in self.plan.checks if c["name"] == "pair_z_consistency")["ok"])
+
+    def test_example_right_copy_from_left_only_when_asked(self):
+        p = synth_dual.write(os.path.join(self.tmp, "patch2.gcode"), layers=LAYERS, differ_layer=6, right_patch=True)
+        ds, _ = load_dual(p, right_from_left=True)
+        self.assertIs(ds.models[1], ds.models[0])
+        self.assertIs(ds.models[3], ds.models[2])
+        self.assertEqual([x["layer"] for x in ds.right_replaced["colour1"]], [6])
+        plan, d = make_dual_plan(ds, self.prof)
+        self.assertTrue(d.ok(), d.render())
+        cm = next(c for c in plan.checks if c["name"] == "colour_mapping")
+        self.assertIn("not used", cm["detail"])
+        with self.assertRaises(StageError):            # the user's own file is never silently changed
+            load_dual(p)
+
     def test_forced_inconsistent_output_fails_verification(self):
         plan, _ = make_dual_plan(self.dual, self.bad_prof)
         text, _ = generate_dual(self.dual, self.bad_prof, plan)
