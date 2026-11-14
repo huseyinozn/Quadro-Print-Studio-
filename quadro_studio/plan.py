@@ -69,6 +69,7 @@ class LayoutOptions:
     purge_step: float = 2.0
     purge_edge_margin: float = 10.0
     purge_lane_gap: float = 0.7
+    park_margin: float = 0.0              # extra gap (mm) above min clearance for stacked (non-endstop) parks
     parallel_speed: float = 350.0
     park_accel: float = 7000.0
     lift_feed: float = 1000.0
@@ -180,15 +181,29 @@ def _snake(k, cols):
     return order
 
 
-def _stacks(prof):
+def _stacks(prof, margin=0.0):
+    """Left/right parking stacks. Endstop positions are fixed by the machine; a
+    stacked (non-endstop) park keeps ``min_clearance + margin`` to its neighbour."""
     c = prof.min_clearance
     car = prof.carriages
+    home = {t: car[t].position_endstop for t in range(4)}
     left, right = {}, {}
     for t in range(4):
-        left[t] = car[t].position_min if t == 0 else max(car[t].position_min, left[t - 1] + c)
+        if t == 0:
+            left[t] = car[t].position_min
+            continue
+        v = max(car[t].position_min, left[t - 1] + c)
+        if abs(v - home[t]) > 1e-9:
+            v = max(car[t].position_min, left[t - 1] + c + margin)
+        left[t] = v
     for t in range(3, -1, -1):
-        right[t] = car[t].position_max if t == 3 else min(car[t].position_max, right[t + 1] - c)
-    home = {t: car[t].position_endstop for t in range(4)}
+        if t == 3:
+            right[t] = car[t].position_max
+            continue
+        v = min(car[t].position_max, right[t + 1] - c)
+        if abs(v - home[t]) > 1e-9:
+            v = min(car[t].position_max, right[t + 1] - c - margin)
+        right[t] = v
     return home, left, right
 
 
@@ -280,7 +295,10 @@ def make_plan(model, prof, opts: LayoutOptions):
         cx, cy = x0 + c * cp, y0 + r * rp
         slots.append(Slot(i, c, r, round(cx, 6), round(cy, 6), round(cx - fcx, 6), round(cy - fcy, 6)))
 
-    home, left, right = _stacks(prof)
+    home, left, right = _stacks(prof, o["park_margin"])
+    if o["park_margin"] < 0:
+        diags.error("PLAN_PARK_MARGIN", "park margin cannot be negative")
+        return None, diags
     plan = Plan(options=o, profile_summary=prof.summary(), slice_summary=dict(model.stats, footprint=[W, H],
                 bbox_extrude=model.bbox_extrude, generator=model.generator), slots=slots, sync_pitch=sync,
                 offsets=offs, layer_z=[b.z for b in model.blocks], foundation_layers=F, park_home=home,

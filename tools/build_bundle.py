@@ -10,7 +10,7 @@ import os
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = ["README.md", "REPORT.md", ".gitignore"]
+SRC = ["README.md", "REPORT.md", "CHECKS.md", ".gitignore"]
 SRC_DIRS = ["quadro_studio", "tests", "tools"]
 RESULTS = ["validation.json", "acceptance_run.json", "plan.json", "inspect.json", "generate.json",
            "generation_audit.json", "unit_tests.log", "preview.svg"]
@@ -33,7 +33,9 @@ def main():
                     if f.endswith((".py", ".md", ".txt")):
                         full = os.path.join(root, f)
                         z.write(full, "review_bundle/" + os.path.relpath(full, ROOT))
-        for f in RESULTS:
+        for f in RESULTS + ["historical_e_check.json"]:
+            if not os.path.exists(os.path.join(acc, "results", f)):
+                continue
             z.write(os.path.join(acc, "results", f), "review_bundle/results/" + f)
         if a.preview_png:
             z.write(a.preview_png, "review_bundle/results/preview.png")

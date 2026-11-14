@@ -205,6 +205,13 @@ class Sim:
         self.e_total = {t: 0.0 for t in range(4)}
         self.homed = False
         self.rel_e = None
+        self.accel = (None, None)            # (ACCEL, ACCEL_TO_DECEL) currently in force
+        self.after_heaters_off = False
+        self.motion_after_shutdown = False
+        self.cleanup = []                    # commands after the last extrusion
+        self.last_ext_line = 0
+        self.park_margins = []               # QPM endpoint gaps minus required clearance
+        self.depo = {}                       # (layer, head) -> deposited amounts vs direct spec
         # bookkeeping
         self.issues = []          # (severity, code, message, line)
         self.issue_counts = {}
@@ -313,6 +320,8 @@ class Sim:
         ea = array("d")
         fa = array("d")
         xy_err = 0.0
+        acc_bad = []
+        piece_f_bad = []
         tol = TOL["xy_align"]
         n_s = len(smoves)
         i = 0
@@ -336,6 +345,10 @@ class Sim:
                     zt = r[6]
                     f = r[8]
                     pcs.append(r)
+                    if abs(r[8] - sm.f) > 0.05:
+                        piece_f_bad.append((sm.line, sm.f, r[8]))
+                    if not accel_ok(r[11], sm.accel):
+                        acc_bad.append((sm.line, sm.accel, r[11]))
                     # piece endpoint must lie on the slicer segment
                     ex = seg_err(r[3], r[4], sm.x0 + d[0], sm.y0 + d[1], tx, ty)
                     if ex > xy_err:
@@ -402,6 +415,16 @@ class Sim:
                         summ["trailer_e_differs"] = summ.get("trailer_e_differs", 0) + 1
                     else:
                         e_bad += 1
+        if piece_f_bad:
+            summ["issues"].append("%d pieces with feedrate differing from the slice (first: slicer line %d, F%s vs F%s)"
+                                  % (len(piece_f_bad), piece_f_bad[0][0], piece_f_bad[0][1], piece_f_bad[0][2]))
+            summ["ok"] = False
+        if acc_bad:
+            summ["issues"].append("%d model moves with acceleration differing from the slice (first: slicer line %d, slice %s, output %s)"
+                                  % (len(acc_bad), acc_bad[0][0], acc_bad[0][1], acc_bad[0][2]))
+            summ["ok"] = False
+            self.issue("error", "ACCELERATION", "T%d layer %d: acceleration differs from slice at slicer line %d (slice %s, output %s)"
+                       % (t, L, acc_bad[0][0], acc_bad[0][1], acc_bad[0][2]), v["line"])
         summ["e_exact_bad"] = e_bad
         summ["f_bad"] = f_bad
         summ["e_rel_max"] = e_max
@@ -428,6 +451,16 @@ class Sim:
         if exp <= 0:
             return
         dev = esum / exp - 1.0
+        d = self.depo.setdefault((L, t), dict(moves=0, e_actual=0.0, e_spec=0.0, signed_err=0.0, abs_err=0.0,
+                                              max_rel=-1e9, min_rel=1e9, max_abs_mm=0.0))
+        d["moves"] += 1
+        d["e_actual"] += esum
+        d["e_spec"] += exp
+        d["signed_err"] += esum - exp
+        d["abs_err"] += abs(esum - exp)
+        d["max_rel"] = max(d["max_rel"], dev)
+        d["min_rel"] = min(d["min_rel"], dev)
+        d["max_abs_mm"] = max(d["max_abs_mm"], abs(esum - exp))
         self.stats["e_found_checked"] += 1
         if abs(dev) > abs(self.stats["e_found_max_dev"]):
             self.stats["e_found_max_dev"] = dev
@@ -482,8 +515,12 @@ class Sim:
         if not self.homed:
             self.issue("error", "OUT_NOT_HOMED", "motion before homing", ln)
             return
+        if self.after_heaters_off:
+            self.motion_after_shutdown = True
         if "F" in w:
             self.f = w["F"]
+            if self.f > self.prof.max_velocity * 60.0 + 1e-6:
+                self.issue("error", "VELOCITY_LIMIT", "F%.1f above printer max_velocity %.0f mm/s" % (self.f, self.prof.max_velocity), ln)
         if any(v != 0.0 for v in self.goff):
             self.issue("error", "OUT_GCODE_OFFSET", "non-zero G-code offset during motion", ln)
         p = self.primary
@@ -556,12 +593,26 @@ class Sim:
                     if self.level[t] < -TOL["retract"]:
                         self.issue("error", "OVER_PRIME", "T%d primed %.5f mm more than retracted" % (t, -self.level[t]), ln)
                 self.e_total[t] += et
-            rec = (ln, x0, y0, x1, y1, z0, z1, et, self.f, kind, None)
+            rec = (ln, x0, y0, x1, y1, z0, z1, et, self.f, kind, None, self.accel)
             if kind == "ext":
                 self.stats["ext_moves"] += 1
+                self.last_ext_line = ln
+                self.cleanup = []
+                if self.after_heaters_off:
+                    self.issue("error", "EXTRUDE_AFTER_SHUTDOWN", "extrusion after TURN_OFF_HEATERS", ln)
+                pa = self.pa.get(t)
+                if pa is None or abs(pa - self.model.pressure_advance) > 1e-9:
+                    self.issue("error", "PRESSURE_ADVANCE", "T%d extrudes with pressure advance %s (slice: %s)" % (t, pa, self.model.pressure_advance), ln)
+                seg = math.hypot(x1 - x0, y1 - y0)
+                ext = self.prof.extruders[t]
+                xs = et * math.pi * (ext.filament_diameter / 2) ** 2 / seg
+                if xs > ext.max_extrude_cross_section + 1e-9:
+                    self.issue("error", "EXTRUDE_CROSS_SECTION", "T%d cross-section %.3f mm2 above %.3f" % (t, xs, ext.max_extrude_cross_section), ln)
                 h = self.on_extrude(t, rec, ln)
                 if h is not None:
-                    rec = rec[:10] + (h,)
+                    rec = rec[:10] + (h, self.accel)
+            elif kind == "eonly" and abs(et) > self.prof.extruders[t].max_extrude_only_distance + 1e-9:
+                self.issue("error", "EXTRUDE_ONLY_DISTANCE", "T%d extrude-only move %.3f mm above limit" % (t, et), ln)
             else:
                 self.on_travel(t, rec, ln)
             if self.visit is not None and t in self.visit["rec"]:
@@ -577,7 +628,7 @@ class Sim:
         return (t, v["d"][t])
 
     def on_extrude(self, t, rec, ln):
-        ln_, x0, y0, x1, y1, z0, z1, e, f, kind, _h = rec
+        ln_, x0, y0, x1, y1, z0, z1, e, f, kind, _h = rec[:11]
         v = self.visit
         owner = ("purge", t)
         hret = None
@@ -637,12 +688,12 @@ class Sim:
         key = self.expect_first.pop(t, None)
         if key is None:
             return
-        ln, x0, y0, x1, y1, z0, z1, e, f, kind, _h = rec
+        ln, x0, y0, x1, y1, z0, z1, e, f, kind, _h = rec[:11]
         self.first_after.append(dict(event=key, nozzle=t, line=ln, layer=v["layer"], tip_above_bed=round(z0 - self.mesh.z(x0, y0), 5),
                                      retract_level_before=round(self.level[t], 6), temp_target=self.target[t], waited=self.waited[t]))
 
     def on_travel(self, t, rec, ln):
-        ln_, x0, y0, x1, y1, z0, z1, e, f, kind, _h = rec
+        ln_, x0, y0, x1, y1, z0, z1, e, f, kind, _h = rec[:11]
         if kind == "eonly" or not (self.over_bed(x0) or self.over_bed(x1)):
             return
         me = self.copy_key(t)
@@ -717,6 +768,8 @@ class Sim:
 
     # ------------------------------------------------------------------ commands
     def command(self, code, ln):
+        if self.last_ext_line:
+            self.cleanup.append(code)
         parts = code.split()
         head = parts[0].upper()
         params = dict(re.findall(r"([A-Za-z_0-9]+)=(\S+)", code))
@@ -812,23 +865,47 @@ class Sim:
         if head == "QUADRO_PARALLEL_MOVE":
             self.end_visit()
             self.close_purge()
+            # Only the non-ARRIVING, X-only branch of the supplied firmware is modelled:
+            # the carriage with the largest displacement is driven by one manual_move and
+            # every other moving carriage follows with scaling |dl_i/dl_p| (COPY/MIRROR),
+            # i.e. x_i(s) = start_i + dl_i * s for one progress s in [0, 1].
+            bad = sorted(set(P) - {"T0", "T1", "T2", "T3", "SPEED", "MIN_CLEARANCE"})
+            if bad:
+                self.issue("error", "QPM_UNSUPPORTED_PROFILE",
+                           "QUADRO_PARALLEL_MOVE with %s is not a verified motion profile (only the non-ARRIVING X-only branch "
+                           "is modelled; ARRIVING delays one carriage and Y/Z join the trajectory)" % ",".join(bad), ln)
+            if any(self.mode[t] == "COPY" for t in range(4)):
+                self.issue("error", "QPM_UNSUPPORTED_PROFILE", "parallel move while a carriage is in COPY mode is not modelled", ln)
             start = dict(self.cx)
             tgt = dict(self.cx)
             for t in range(4):
                 if "T%d" % t in P:
                     tgt[t] = float(P["T%d" % t])
+            sp = float(P.get("SPEED", 50))
+            if sp > self.prof.max_velocity + 1e-9:
+                self.issue("error", "VELOCITY_LIMIT", "parallel move SPEED %.0f above max_velocity" % sp, ln)
             mc = float(P.get("MIN_CLEARANCE", self.c))
             if mc < self.c - 1e-9:
                 self.issue("error", "QPM_CLEARANCE_PARAM", "MIN_CLEARANCE %.2f below profile %.2f" % (mc, self.c), ln)
-            for label, pos in (("start", start), ("target", tgt)):
-                for t in range(4):
-                    if pos[t] is None:
-                        continue
-                    if not (self.lim[t][0] - 1e-6 <= pos[t] <= self.lim[t][1] + 1e-6):
-                        self.issue("error", "QPM_LIMIT", "%s T%d %.4f outside limits" % (label, t, pos[t]), ln)
-                for t in range(3):
-                    if pos[t] is not None and pos[t + 1] is not None and pos[t + 1] - pos[t] < self.c - 1e-6:
-                        self.issue("error", "QPM_CLEARANCE", "%s gap T%d/T%d %.4f" % (label, t, t + 1, pos[t + 1] - pos[t]), ln)
+            if any(start[t] is None for t in range(4)):
+                self.issue("error", "QPM_UNKNOWN_START", "carriage positions unknown before parallel move", ln)
+            else:
+                worst = 1e9
+                for k in range(0, 21):
+                    sfr = k / 20.0
+                    pos = {t: start[t] + (tgt[t] - start[t]) * sfr for t in range(4)}
+                    for t in range(4):
+                        if not (self.lim[t][0] - 1e-6 <= pos[t] <= self.lim[t][1] + 1e-6):
+                            self.issue("error", "QPM_LIMIT", "T%d %.4f outside limits at progress %.2f" % (t, pos[t], sfr), ln)
+                    for t in range(3):
+                        g = pos[t + 1] - pos[t]
+                        worst = min(worst, g - self.c)
+                        if g < self.c - 1e-6:
+                            self.issue("error", "QPM_CLEARANCE", "gap T%d/T%d %.4f < %.2f at progress %.2f" % (t, t + 1, g, self.c, sfr), ln)
+                tg = min(tgt[t + 1] - tgt[t] for t in range(3)) - self.c
+                self.park_margins.append(dict(line=ln, min_margin_on_path=round(worst, 4), margin_at_target=round(tg, 4),
+                                              zero_margin_pairs=["T%d/T%d" % (t, t + 1) for t in range(3)
+                                                                 if abs(tgt[t + 1] - tgt[t] - self.c) < 1e-6]))
             # sweep clearance above deposits (all nozzles move along X at fixed Y/Z)
             for t in range(4):
                 if start[t] is None:
@@ -849,7 +926,6 @@ class Sim:
                             self.issue("error", "QPM_SWEEP_CLEARANCE", "T%d sweeps %.3f mm above deposited material" % (t, m), ln)
                     x += 2.0
             dist = max(abs(tgt[t] - start[t]) for t in range(4) if start[t] is not None)
-            sp = float(P.get("SPEED", 50))
             self.stats["est_time_s"] += dist / sp
             self.qpms.append(dict(line=ln, start={t: start[t] for t in range(4)}, target={t: tgt[t] for t in range(4)},
                                   z=self.z, y=self.y, modes=dict(self.mode)))
@@ -860,6 +936,8 @@ class Sim:
             t = int(float(P.get("T", re.search(r"T(\d)", code).group(1) if re.search(r"\bT(\d)", code) else 0)))
             sm = re.search(r"\bS([-\d.]+)", code)
             v = float(sm.group(1)) if sm else 0.0
+            if v > self.prof.extruders[t].max_temp:
+                self.issue("error", "TEMP_LIMIT", "T%d target %.0f above max_temp %.0f" % (t, v, self.prof.extruders[t].max_temp), ln)
             if abs(v - self.target[t]) > 1e-9:
                 self.waited[t] = False
             self.target[t] = v
@@ -869,9 +947,12 @@ class Sim:
         if head in ("M140", "M190"):
             sm = re.search(r"\bS([-\d.]+)", code)
             self.bed = float(sm.group(1)) if sm else 0.0
+            if self.bed > self.prof.bed_max_temp:
+                self.issue("error", "TEMP_LIMIT", "bed target %.0f above max_temp %.0f" % (self.bed, self.prof.bed_max_temp), ln)
             self.bed_waited = head == "M190"
             return
         if head == "TURN_OFF_HEATERS":
+            self.after_heaters_off = True
             for t in range(4):
                 self.target[t] = 0.0
                 self.waited[t] = False
@@ -885,13 +966,20 @@ class Sim:
             self.fan[t] = float(P.get("SPEED", 0))
             return
         if head == "SET_PRESSURE_ADVANCE":
+            if "EXTRUDER" not in P or set(P) - {"EXTRUDER", "ADVANCE"}:
+                self.issue("error", "OUT_UNSUPPORTED", "SET_PRESSURE_ADVANCE must name EXTRUDER and only set ADVANCE", ln)
             e = EXTR_IDX.get(P.get("EXTRUDER", "extruder"))
             self.pa[e] = float(P.get("ADVANCE", 0))
             return
         if head == "SET_VELOCITY_LIMIT":
-            a = float(P.get("ACCEL", 0))
-            if a > self.prof.max_accel + 1e-9:
-                self.issue("warning", "ACCEL_CAPPED", "ACCEL %.0f above printer max %.0f" % (a, self.prof.max_accel), ln)
+            bad = set(P) - {"ACCEL", "ACCEL_TO_DECEL"}
+            if bad:
+                self.issue("error", "OUT_UNSUPPORTED", "SET_VELOCITY_LIMIT parameter(s) %s not modelled" % sorted(bad), ln)
+            a = float(P["ACCEL"]) if "ACCEL" in P else self.accel[0]
+            a2 = float(P["ACCEL_TO_DECEL"]) if "ACCEL_TO_DECEL" in P else self.accel[1]
+            if a is not None and a > self.prof.max_accel + 1e-9:
+                self.issue("error", "ACCEL_LIMIT", "ACCEL %.0f above printer max_accel %.0f" % (a, self.prof.max_accel), ln)
+            self.accel = (a, a2)
             return
         self.unknown[head] = self.unknown.get(head, 0) + 1
         self.issue("error", "OUT_UNKNOWN_COMMAND", "command not in the verified output dialect: %s" % code[:60], ln)
@@ -901,7 +989,9 @@ class Sim:
         fs = dict(
             heaters_off=all(self.target[t] == 0 for t in range(4)) and self.bed == 0,
             fans_off=all(self.fan[t] == 0 for t in range(4)),
-            carriages_home=all(self.cx[t] is not None and abs(self.cx[t] - self.home[t]) < 1e-6 for t in range(4)),
+            carriages_parked=all(self.cx[t] is not None and abs(self.cx[t] - self.home[t]) < 1e-6 for t in range(4)),
+            parked_positions={("T%d" % t): self.cx[t] for t in range(4)},
+            cleanup_commands_after_last_extrusion=list(self.cleanup),
             modes=dict(self.mode), primary=self.primary,
             extruders_unsynced=all(self.queue[t] == t for t in range(4)),
             mesh_state=self.mesh_state, gcode_offset_zero=all(v == 0 for v in self.goff),
@@ -910,9 +1000,18 @@ class Sim:
         )
         fs["modes_ok"] = self.mode[0] == "PRIMARY" and all(self.mode[t] == "INACTIVE" for t in (1, 2, 3))
         self.final = fs
-        for k in ("heaters_off", "fans_off", "carriages_home", "extruders_unsynced", "modes_ok", "gcode_offset_zero"):
+        fs["no_motion_after_shutdown"] = not self.motion_after_shutdown
+        for k in ("heaters_off", "fans_off", "carriages_parked", "extruders_unsynced", "modes_ok", "gcode_offset_zero"):
             if not fs[k]:
                 self.issue("error", "FINAL_STATE", "final state check failed: %s" % k, 0)
+
+
+def accel_ok(out, sl):
+    """Output acceleration state must equal the slice's modal state for the move."""
+    for o, s_ in zip(out, sl):
+        if s_ is not None and (o is None or abs(o - s_) > 1e-6):
+            return False
+    return True
 
 
 def seg_err(px, py, ax, ay, bx, by):
@@ -1085,6 +1184,13 @@ def analyse(sim: Sim, expected_count=None, min_gap=2.0):
     if cz_max > TOL["copy_common_z"]:
         sim.issue("error", "COMMON_Z", "foundation tops of a copy group differ by %.4f mm in commanded Z" % cz_max, 0)
     res["final_state"] = sim.final
+    res["deposition_vs_direct_spec"] = {"L%d/T%d" % k: dict(v, e_actual=round(v["e_actual"], 5), e_spec=round(v["e_spec"], 5),
+                                                          signed_err=round(v["signed_err"], 6), abs_err=round(v["abs_err"], 6),
+                                                          max_rel=round(v["max_rel"], 5), min_rel=round(v["min_rel"], 5),
+                                                          max_abs_mm=round(v["max_abs_mm"], 6))
+                                        for k, v in sorted(sim.depo.items())}
+    res["park_margins"] = sim.park_margins
+    res["min_park_margin_mm"] = min((p["min_margin_on_path"] for p in sim.park_margins), default=None)
     st = dict(sim.stats)
     res["stats"] = st
     res["issues"] = sim.issues

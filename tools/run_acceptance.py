@@ -22,7 +22,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 PY = sys.executable
-CANDIDATE_NAME = "CANDIDATE_farm40_shark_software-verified_NOT-hardware-validated.gcode"
+CANDIDATE_NAME = "CANDIDATE_v2_farm40_shark_software-verified_NOT-hardware-validated.gcode"
 
 
 def sha(p):
@@ -68,6 +68,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fixtures", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--historical", default=None,
+                    help="optional folder with historical_foundations.txt and old_mesh.cfg (test-only, never used by generate)")
     a = ap.parse_args()
     fx = os.path.abspath(a.fixtures)
     out = os.path.abspath(a.out)
@@ -113,6 +115,49 @@ def main():
     rc, tver = run(cli + ["verify", "--slice", SL, "--profile", PR, "--gcode", CAND, "--oracle", ORACLE,
                           "--out", os.path.join(R, "validation.json")], log)
     summary["verify_exit"] = rc
+
+    # 2b) historical E rule (test-only; reads private historical assets, writes numbers only)
+    if a.historical:
+        hd = os.path.abspath(a.historical)
+        rc, el = run([PY, os.path.join(ROOT, "tools", "historical_e_check.py"), "--slice", SL, "--profile", PR,
+                      "--old-gcode", os.path.join(hd, "historical_foundations.txt"), "--old-mesh", os.path.join(hd, "old_mesh.cfg"),
+                      "--reference", ORACLE, "--out", os.path.join(R, "historical_e_check.json")], log)
+        summary["historical_e_check"] = dict(exit_code=rc, elapsed_s=el)
+
+    # 2c) verifier must reject mutated versions of the real candidate
+    W0 = os.path.join(out, "work")
+    vneg = []
+    base = open(CAND).read().split("\n")
+
+    def vmut(name, fn, expect):
+        pth = os.path.join(W0, "mut_" + name + ".gcode")
+        open(pth, "w").write("\n".join(fn(list(base))))
+        rc, el = run(cli + ["verify", "--slice", SL, "--profile", PR, "--gcode", pth, "--out", os.path.join(W0, "mut_" + name + ".json")], log)
+        r = json.load(open(os.path.join(W0, "mut_" + name + ".json")))["candidate_result"]
+        vneg.append(dict(case=name, exit_code=rc, error_codes=sorted(r["issue_counts"]), expected=expect,
+                         passed=rc != 0 and bool(set(expect) & set(r["issue_counts"])), elapsed_s=el))
+        os.remove(pth)
+
+    def drop_accel(L):
+        i = next(k for k, l in enumerate(L) if l.startswith("; FARM_PART layer=30 "))
+        j = next(k for k in range(i, len(L)) if L[k].startswith("SET_VELOCITY_LIMIT") and k > i + 2)
+        return L[:j] + L[j + 1:]
+
+    def change_pa(L):
+        return [l.replace("ADVANCE=0.044", "ADVANCE=0.03") if l.startswith("SET_PRESSURE_ADVANCE EXTRUDER=extruder2") else l for l in L]
+
+    def narrow_park(L):
+        return [l.replace("T2=-56.50000", "T2=-59.50000") if l.startswith("QUADRO_PARALLEL_MOVE") else l for l in L]
+
+    def arriving(L):
+        k = next(k for k, l in enumerate(L) if l.startswith("QUADRO_PARALLEL_MOVE") and "T1=356.5" in l)
+        return L[:k] + [L[k] + " ARRIVING=T0"] + L[k + 1:]
+
+    vmut("missing_acceleration", drop_accel, ["ACCELERATION"])
+    vmut("changed_pressure_advance_T2", change_pa, ["PRESSURE_ADVANCE"])
+    vmut("narrow_gap_changed_park_T2", narrow_park, ["QPM_CLEARANCE"])
+    vmut("unsupported_arriving_profile", arriving, ["QPM_UNSUPPORTED_PROFILE"])
+    summary["verifier_negative_cases"] = vneg
 
     # 3) negative cases: each must refuse and write no G-code
     W = os.path.join(out, "work")
@@ -210,6 +255,7 @@ def main():
     with open(os.path.join(R, "acceptance_run.json"), "w") as f:
         json.dump(summary, f, indent=1)
     print("negative cases passed: %d/%d" % (sum(n["passed"] for n in neg), len(neg)))
+    print("verifier mutation cases rejected: %d/%d" % (sum(n["passed"] for n in vneg), len(vneg)))
     print("regeneration cases passed: %d/%d" % (sum(r["passed"] for r in regen), len(regen)))
     print("unit tests:", tail)
     print("total %.1fs" % (time.time() - T0))

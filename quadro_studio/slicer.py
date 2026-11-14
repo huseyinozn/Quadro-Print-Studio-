@@ -41,7 +41,35 @@ from .diagnostics import Diagnostics, StageError
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 WORD = re.compile(r"([A-Za-z])\s*([-+]?(?:\d+\.?\d*|\.\d+))")
 SUPPORTED_GENERATORS = ("CoPrintSlicer",)
-RETRACT_TOL = 5e-5   # slicer prints E with 5 decimals; sums of wipe pieces drift by <= 2e-5
+RETRACT_TOL = 5e-5
+UNSUPPORTED_LIMITS = {
+    "M600": "filament change pauses one head; four synchronized heads cannot be paused per copy",
+    "PAUSE": "a pause parks only the active toolhead; parked/COPY carriages are not handled",
+    "RESUME": "resume restores a single-toolhead state",
+    "M601": "pause: see PAUSE",
+    "SET_RETRACTION": "firmware retraction parameters are not modelled (slicer retraction only)",
+    "M207": "firmware retraction parameters are not modelled",
+    "M220": "speed factor inside the print would change every copy's feedrates; not replicated",
+    "M221": "flow factor inside the print would change E of every copy; not replicated",
+    "SET_FAN_SPEED": "direct fan control would address one named fan, not the printing heads; use M106",
+    "M900": "linear advance (Marlin) is not Klipper pressure advance",
+    "SET_GCODE_OFFSET": "G-code offsets are owned by Farm Mode (tool offsets are applied in coordinates)",
+    "BED_MESH_CALIBRATE": "probing during the print is not allowed",
+    "BED_MESH_PROFILE": "runtime mesh would be stacked on the embedded compensation",
+    "G28": "homing inside the print would move all carriages",
+    "G29": "probing during the print is not allowed",
+    "G4": "dwell not supported in phase 1 (timing differs between heads)",
+    "M400": "wait-for-moves inside model blocks is not supported in phase 1",
+    "SET_DUAL_CARRIAGE": "carriage modes are owned by Farm Mode",
+    "ACTIVATE_EXTRUDER": "extruder selection is owned by Farm Mode",
+    "SYNC_EXTRUDER_MOTION": "extruder synchronisation is owned by Farm Mode",
+    "QUADRO_PARALLEL_MOVE": "carriage parking is owned by Farm Mode",
+    "TIMELAPSE_RENDER": "timelapse is not supported",
+}
+UNSUPPORTED_PREFIX = (
+    ("EXCLUDE_OBJECT", "object exclusion would cancel one copy's paths while the synchronized heads keep printing"),
+    ("SET_PRESSURE_ADVANCE", "pressure advance must only set ADVANCE once for the single print extruder"),
+)   # slicer prints E with 5 decimals; sums of wipe pieces drift by <= 2e-5
 
 
 @dataclass
@@ -58,6 +86,7 @@ class Move:
     kind: str           # extrude | wipe | travel | zmove | retract | deretract
     width: float = 0.0
     ftype: str = ""
+    accel: tuple = (None, None)   # modal (ACCEL, ACCEL_TO_DECEL) in force for this move
 
     @property
     def xy_len(self):
@@ -221,6 +250,7 @@ def load_slice(path, diags: Diagnostics | None = None):
     width = 0.0
     ftype = ""
     accel = ""
+    accel_state = (None, None)
     fan = 0.0
     tool_selected = False
     start_params = {}
@@ -353,7 +383,7 @@ def load_slice(path, diags: Diagnostics | None = None):
                 kind = "deretract"
             else:
                 kind = "retract"
-            mv = Move(i + 1, x, y, z, nx, ny, nz, e, nf, kind, width, ftype)
+            mv = Move(i + 1, x, y, z, nx, ny, nz, e, nf, kind, width, ftype, accel_state)
             if kind == "zmove_e":
                 err("SLICE_UNSUPPORTED_GCODE", "combined Z + E move without XY is not supported", i)
             # ---- state machine -------------------------------------------------
@@ -379,6 +409,7 @@ def load_slice(path, diags: Diagnostics | None = None):
                     cur.deretract = approach_de
                     cur.deretract_f = approach_de_f
                     cur.fan_at_start = fan
+                    cur.accel_at_start = accel     # modal state in force at the first extrusion
                     cur.start = (x, y)
                     cur.first_line = i + 1
                     if abs(z - cur.z) > 1e-6:
@@ -468,8 +499,8 @@ def load_slice(path, diags: Diagnostics | None = None):
             if set(params) - {"ACCEL", "ACCEL_TO_DECEL", "VELOCITY", "SQUARE_CORNER_VELOCITY", "MINIMUM_CRUISE_RATIO"}:
                 err("SLICE_UNSUPPORTED_GCODE", "unsupported SET_VELOCITY_LIMIT parameters: %s" % code, i)
             accel = code
-            if mode == "trailer":
-                pass
+            accel_state = (float(params["ACCEL"]) if "ACCEL" in params else accel_state[0],
+                           float(params["ACCEL_TO_DECEL"]) if "ACCEL_TO_DECEL" in params else accel_state[1])
             if mode == "block":
                 cur.items.append(Cmd(i + 1, code, "accel"))
         elif head == "SET_PRESSURE_ADVANCE":
@@ -534,8 +565,18 @@ def load_slice(path, diags: Diagnostics | None = None):
             end_seen = True
             mode = "end"
         else:
-            err("SLICE_UNSUPPORTED_GCODE", "unsupported command %r" % code[:60], i,
-                "Only the commands listed in the README are accepted in phase 1.")
+            name = code.split()[0].upper()
+            lim = UNSUPPORTED_LIMITS.get(name)
+            if lim is None:
+                for pref, txt in UNSUPPORTED_PREFIX:
+                    if name.startswith(pref):
+                        lim = txt
+                        break
+            if lim is None:
+                lim = ("macro or command with unknown semantics; Farm Mode cannot tell whether it moves the toolhead, "
+                       "extrudes or changes machine state, so it cannot be replicated safely on four heads")
+            err("SLICE_UNSUPPORTED_GCODE", "unsupported command %s: %s" % (name, lim), i,
+                "Remove it in the slicer (custom G-code) and re-slice; accepted commands are listed in README.md.")
 
     if mode == "trailer":
         end_trailer()

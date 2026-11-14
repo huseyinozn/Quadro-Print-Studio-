@@ -11,7 +11,7 @@ def fmt(v, nd=4):
     return ("%%.%df" % nd) % v
 
 
-CAUSE = ("Cause **not verified — open finding**. Rules tested on the largest-difference move without reproducing the oracle value: "
+CAUSE_UNUSED = ("Cause **not verified — open finding**. Rules tested on the largest-difference move without reproducing the oracle value: "
          "flow-area or linear thickness ratio at piece midpoints, at piece end points or start points, and the surface of another head. "
          "The oracle's implied linear thickness there is 0.1432 mm while both files command the same Z.")
 
@@ -35,10 +35,13 @@ def main():
     reg = acc["regeneration_cases"]
     fs = c["final_state"]
     fst = plan["foundation_stats"]
+    hp = os.path.join(R, "historical_e_check.json")
+    hist = json.load(open(hp)) if os.path.exists(hp) else None
+    vneg = acc.get("verifier_negative_cases", [])
     L = []
     w = L.append
 
-    w("# Farm Mode milestone 1 — review report")
+    w("# Farm Mode milestone 1 — review report v2 (after review 02)")
     w("")
     w("**Status: CANDIDATE.** The 40-shark file was generated from the slice and the printer profile only, then checked by an "
       "independent simulator. All software checks pass (%d errors). It is **not validated on hardware** and two physical "
@@ -54,6 +57,7 @@ def main():
     w("| Verification | %.1f s (candidate + oracle simulation + comparison) |" % acc["candidate"]["verify_elapsed_s"])
     w("| Tests | %s — %s |" % (acc["unit_tests"]["cmd"], " ".join(x for x in acc["unit_tests"]["summary"] if x)))
     w("| Negative cases | %d/%d refused with the expected diagnostic and no G-code written |" % (sum(n["passed"] for n in neg), len(neg)))
+    w("| Verifier mutation cases (real candidate) | %d/%d rejected with the expected diagnostic |" % (sum(n["passed"] for n in vneg), len(vneg)))
     w("| Regeneration cases | %d/%d generated and independently verified |" % (sum(r["passed"] for r in reg), len(reg)))
     w("| Motion-only time estimate | %.2f h (no accel, no heat-up; rough) |" % (cs["est_time_s"] / 3600))
     w("| Whole acceptance run | %.0f s |" % acc["elapsed_total_s"])
@@ -99,8 +103,8 @@ def main():
     fp = [x for x in c["first_prints"]]
     w("| First print after each purge | %s | primed, heated |" % ", ".join("T%d %.3f mm above bed" % (x["nozzle"], x["tip_above_bed"]) for x in fp if x["event"] == "after_purge"))
     w("| First print after COPY entry | all 4 heads primed (retract level %s), heated | |" % sorted({x["retract_level_before"] for x in fp if x["event"] == "after_copy_entry"}))
-    w("| Final state | heaters off %s, fans off %s, carriages home %s, T0 PRIMARY/others INACTIVE %s, extruders unsynced %s, mesh `%s` | |"
-      % (fs["heaters_off"], fs["fans_off"], fs["carriages_home"], fs["modes_ok"], fs["extruders_unsynced"], fs["mesh_state"]))
+    w("| Final state | heaters off %s, fans off %s, carriages parked at endstop positions %s, T0 PRIMARY/others INACTIVE %s, extruders unsynced %s, mesh `%s` | |"
+      % (fs["heaters_off"], fs["fans_off"], fs["carriages_parked"], fs["modes_ok"], fs["extruders_unsynced"], fs["mesh_state"]))
     w("")
     w("## 3. Comparison with the reviewed 40-shark oracle (after generation, verify stage only)")
     w("")
@@ -113,18 +117,42 @@ def main():
     er = cm["e_ratio_minus_1"]
     we = cm["worst"]["e_found"]["where"]
     w("* E in layer 1 and layers ≥%d: identical within %.1e (rounding)." % (plan["foundation_layers"] + 1, abs(cm["worst"]["e_exact"]["value"])))
-    w("* **Open finding — foundation E (layers 2–%d).** No tolerance is applied to this difference: the oracle's foundation E rule "
-      "could not be recovered, so neither file is accepted as the reference for it. Per head, candidate/oracle − 1: %s."
-      % (plan["foundation_layers"], "; ".join("%s %+.2f %%..%+.2f %% (%d of %d moves >1 %%, %d >2 %%)" % (k.split("/")[1], 100 * v["min"], 100 * v["max"], v["over_1pct"], v["moves"], v["over_2pct"])
-                                          for k, v in er.items() if k.startswith("L2"))))
-    w("  * Largest difference: head **%s**, layer **%d**, slicer line **%d** (%s, width %.3f mm, slicer E %.5f mm): "
-      "oracle **%.6f mm**, candidate **%.6f mm** (candidate − oracle %+.6f mm, %+.2f %%). Commanded nozzle Z there: candidate %.5f, oracle %.5f."
-      % (we["head"], we["layer"], we["slicer_line"], we["feature"], we["width"], we["slicer_e_mm"], we["oracle_e_mm"], we["candidate_e_mm"],
-         we["candidate_minus_oracle_mm"], 100 * cm["worst"]["e_found"]["value"], we["candidate_tip_z"], we["oracle_tip_z"]))
-    w("  * Same Z in both files, so the difference is only the E rule. The candidate follows A(h,w)/A(0.2,w) at the local thickness "
-      "(independently re-measured: max %.2f %%, tolerance %.1f %% derived from the thickness estimator). The oracle deviates from that rule "
-      "by up to %.2f %%. %s"
-      % (100 * abs(cs["e_found_max_dev"]), 100 * tol["e_found_rel"], 100 * abs(os_["e_found_max_dev"]), CAUSE))
+    w("")
+    w("### 3a. Foundation E — historical rule verified (parity question, not a production rule)")
+    w("")
+    if hist:
+        w("Re-computed here from the supplied old mesh (141253) and old generated commands, without using them in generation: "
+          "%d positive deposition pieces on layers 2–%d of the four heads aligned (XY mismatches: %d). For each piece at its end point "
+          "`E_printed = round(E_old × h_new / h_old, 8)` reproduces the printed reference exactly for %d pieces and within one unit of the "
+          "8th decimal for %d (max |Δ| %.1e mm; the remaining unit comes from evaluating h in double precision). Old E itself is reproduced by "
+          "slicer E apportioned over ≤ 4 mm pieces × A(h_old,w)/A(0.2,w) at the piece end point within %.1e mm (%.3f %%). "
+          "With the remesh ratio this two-step rule gives **%.7f mm** for T1 slot 8 layer 3 line 4384 (printed 0.160697)."
+          % (hist["pieces"], plan["foundation_layers"], hist["xy_mismatch"], hist.get("exact_8_decimals", 0), hist.get("one_unit_8th_decimal", 0),
+             hist["remesh_max_abs_err"], hist["old_model_max_abs_err"], 100 * hist["old_model_max_rel_err"], hist["line4384_two_step_printed_estimate"]))
+    else:
+        w("Historical assets not supplied for this run; rule not re-checked.")
+    w("")
+    w("So the printed file is the *flow-area rule at the old mesh, linearly rescaled to the new mesh*. The candidate applies the "
+      "flow-area rule directly at the current mesh. That is the production method (a user supplies one current profile; the remesh "
+      "needs a previous file and mesh). The parity difference is therefore explained: head **%s**, layer **%d**, slicer line **%d**: "
+      "oracle %.6f mm, candidate %.6f mm (%+.6f mm, %+.2f %%); per head the candidate/oracle ratio − 1 is %s."
+      % (we["head"], we["layer"], we["slicer_line"], we["oracle_e_mm"], we["candidate_e_mm"], we["candidate_minus_oracle_mm"],
+         100 * cm["worst"]["e_found"]["value"],
+         "; ".join("%s %+.2f..%+.2f %%" % (k.split("/")[1], 100 * v["min"], 100 * v["max"]) for k, v in er.items() if k.startswith("L2"))))
+    w("")
+    w("### 3b. Foundation E — candidate versus the direct specification (independent of parity)")
+    w("")
+    w("Spec: E = slicer E × piece share × A(h,w)/A(0.2,w), with h re-measured by the verifier from the output itself "
+      "(plane fit of the previous layer of the same copy). Tolerance per move %.1f %% (derived from the thickness estimator, not from the oracle)."
+      % (100 * tol["e_found_rel"]))
+    w("")
+    w("| Layer/head | moves checked | E actual (mm) | E spec (mm) | signed error (mm) | abs error (mm) | max rel | min rel |")
+    w("|---|---|---|---|---|---|---|---|")
+    for k, v in c["deposition_vs_direct_spec"].items():
+        w("| %s | %d | %.4f | %.4f | %+.5f | %.5f | %+.3f %% | %+.3f %% |" % (k, v["moves"], v["e_actual"], v["e_spec"], v["signed_err"], v["abs_err"], 100 * v["max_rel"], 100 * v["min_rel"]))
+    w("")
+    w("For comparison, the oracle measured against the same direct spec: max %.2f %% (%d moves above %.1f %%) — expected, because it follows the "
+      "historical remesh rule (3a)." % (100 * abs(os_["e_found_max_dev"]), o["issue_counts"].get("FOUNDATION_FLOW", 0), 100 * tol["e_found_rel"]))
     w("")
     w("Intentional differences (candidate vs oracle):")
     w("")
@@ -145,37 +173,55 @@ def main():
     w("")
     w("## 4. Transitions and parking")
     w("")
-    w("| Line | Phase | T0 | T1 | T2 | T3 | Z |")
-    w("|---|---|---|---|---|---|---|")
-    names = ["home"] + ["arrange T0", "home after T0", "arrange T1", "home after T1", "arrange T2", "home after T2", "arrange T3",
-                        "home after T3", "COPY entry", "final home"]
+    w("Every final position is called *parked* (at the endstop positions), not homed: no homing happens at the end.")
+    w("")
+    w("| Line | Phase | T0 | T1 | T2 | T3 | Z | zero-margin pairs at target |")
+    w("|---|---|---|---|---|---|---|---|")
+    names = ["park (endstop positions)", "arrange T0", "park after T0", "arrange T1", "park after T1", "arrange T2", "park after T2", "arrange T3",
+             "park after T3", "COPY entry", "final park"]
+    pm = {p_["line"]: p_ for p_ in c.get("park_margins", [])}
     for i, q in enumerate(c["parallel_moves"]):
         t = q["target"]
-        w("| %d | %s | %.2f | %.2f | %.2f | %.2f | %.2f |" % (q["line"], names[i] if i < len(names) else "", t["T0"], t["T1"], t["T2"], t["T3"], q["z"]))
+        zm = ", ".join(pm.get(q["line"], {}).get("zero_margin_pairs", [])) or "-"
+        w("| %d | %s | %.2f | %.2f | %.2f | %.2f | %.2f | %s |" % (q["line"], names[i] if i < len(names) else "", t["T0"], t["T1"], t["T2"], t["T3"], q["z"], zm))
+    w("")
+    w("**Parked-head discrepancy (your observation: during the T3 foundation T0 looked correctly parked, T1 was right of −112.75 and "
+      "T2 immediately right of T1).** Commanded state in both the oracle and the candidate during that phase: T0 −169.00, T1 −112.75, "
+      "T2 −56.50, i.e. T1/T2 commanded exactly at the 56.25 mm minimum clearance — **0.000 mm margin** (T0/T1 also 0 by the endstop "
+      "positions). The verifier proves only *commanded* non-overlap along every modelled path (min margin on all parallel-move paths %s mm). "
+      "It cannot show when or why T1 was displaced, nor that the T2 right-then-left detour caused it; that needs physical confirmation "
+      "(e.g. checking T1 position before/after the T3-arrange move). With zero commanded margin any displacement of T1 to the right "
+      "means physical contact with T2. Option added, not default (parity kept): `--park-margin M` keeps stacked parks M mm above the minimum "
+      "clearance (e.g. T2 at −56.5 + M during the T3 run)." % c.get("min_park_margin_mm"))
     w("")
     t2 = [d for d in c["carriage_detours"] if d["head"] == "T2" and d["path"][1] == 412.75 and d["path"][2] < 0]
     if t2:
         d = t2[0]
-        w("**Known T2 detour (kept for parity, not redesigned):** after its foundation T2 parks right at 412.75 and is then sent left to "
-          "−56.5 so T3 can work: path %s → %s → %s, %.1f mm of extra carriage travel versus a direct move. Both moves are inside limits and "
-          "keep ≥ 56.25 mm to the neighbours at start and end (affine parallel move), so it is inefficient, not hazardous. The oracle "
-          "has the same pattern. Other reversals are by design: T1 parks right (356.5) while T0 prints and returns home afterwards; "
-          "T0/T2/T3 leave their homes to reach their zones." % (d["path"][0], d["path"][1], d["path"][2], d["extra_travel_mm"]))
+        w("**T2 detour (kept for parity, not redesigned):** after its foundation T2 is parked right at 412.75 and then sent left to "
+          "−56.5 for the T3 run: path %s → %s → %s, %.1f mm of extra carriage travel versus a direct move. Commanded gaps stay ≥ 56.25 mm "
+          "along the whole path (affine non-ARRIVING branch, checked at 21 points)." % (d["path"][0], d["path"][1], d["path"][2], d["extra_travel_mm"]))
     w("")
-    w("While a head prints its foundation the others are off the bed (T0 run: T1 356.5, T2 412.75, T3 469; T3 run: T2 −56.5). "
-      "If the 'parked-head discrepancy' you saw is one of these positions, the table above shows exactly where every carriage is.")
+    w("Cleanup after the last extrusion (exact commands): `%s`. Motors are left enabled (no `M84`), as in the oracle."
+      % "; ".join(fs["cleanup_commands_after_last_extrusion"]))
     w("")
-    w("## 5. What is measured, assumed and physically unverified")
+    w("## 5. Hardware assumptions (clean statement)")
     w("")
-    w("* **Measured inputs (profile)**: saved mesh `default` 9×9, tool offsets (bed_pin_offsets.json), carriage limits, Y/Z ranges, "
-      "min clearance 56.25 (quadro_parallel_carriage), extruder rotation distances (kept per extruder in COPY via `SYNC_EXTRUDER_MOTION`).")
-    w("* **Assumed macro/firmware behaviour** (not executable offline): `_PRINT_HOME` homes, probes Z at (150,150) where the mesh is 0, "
-      "leaves T0 primary at X150 with T1 at 356.5 (homing's `QUADRO_DISTRIBUTE_X`); `QUADRO_PARALLEL_MOVE` is affine; COPY copies "
-      "the primary X motion with the current offset; `M109`/`M190` wait. Initial filament state of T1–T3 assumed primed.")
-    w("* **Software-validated**: everything in sections 2–4 for this slice/profile; other counts/models only by the same checks "
-      "(%s)." % plan["validated_scope"])
-    w("* **Not physically validated**: no print, no motion on hardware. The oracle's successful print is evidence for its own file, not for "
-      "this candidate's differences (prime lanes, wipes, transfer heights).")
+    w("Software-verified means: the commanded motion satisfies every check in `CHECKS.md` under the machine model below. "
+      "Nothing has been run on hardware.")
+    w("")
+    w("1. Measured inputs taken as true: the saved mesh (`default`), tool offsets (bed_pin_offsets.json), carriage/Y/Z limits, "
+      "min clearance 56.25 mm, velocity/acceleration limits, extruder limits from the profile.")
+    w("2. `_PRINT_HOME TEMP BED_TEMP` homes all axes, probes Z at (150,150) (mesh value there 0), leaves T0 primary/active at X150 with zero "
+      "G-code offset, T1 at 356.5 and T2/T3 at their endstops (`QUADRO_DISTRIBUTE_X`). Not executed offline.")
+    w("3. `QUADRO_PARALLEL_MOVE` without ARRIVING/Y/Z behaves as the supplied firmware's `_execute_parallel_move`: largest-displacement "
+      "carriage driven, others scaled (COPY/MIRROR) → all carriages affine in one progress variable; other profiles are rejected.")
+    w("4. `SET_DUAL_CARRIAGE … MODE=COPY` copies the primary's X motion with the carriage offset at that moment; `SYNC_EXTRUDER_MOTION` "
+      "keeps each extruder's rotation distance and pressure advance.")
+    w("5. `M109`/`M190` macros wait for temperature. T1–T3 start primed (loaded filament, not retracted).")
+    w("6. Carriages stay where commanded (no missed steps, no external displacement) — **contradicted once by your observation** (section 4).")
+    w("7. The bed is as measured, including the deviating point (section 6).")
+    w("")
+    w("Validated scope: %s." % plan["validated_scope"])
     w("")
     w("## 6. Physical uncertainties that need your decision")
     w("")
@@ -183,19 +229,34 @@ def main():
     if not dev:
         w("1. No saved mesh point deviates markedly from its neighbours (threshold %.2f mm); no copy is flagged." % plan["options"]["outlier_threshold"])
     else:
-        w("1. **Mesh points that deviate markedly from their neighbours** (this printer's mesh, threshold %.2f mm; values used unchanged):"
-          % plan["options"]["outlier_threshold"])
+        w("1. **Mesh points that deviate markedly from their neighbours** (evaluated on this printer's mesh, threshold %.2f mm; measured "
+          "values used unchanged, never replaced):" % plan["options"]["outlier_threshold"])
         for p_ in dev:
-            w("   * (%.2f, %.2f) = %.4f mm, %+.3f mm vs. neighbour median %.4f mm. Copies depending on it (> 0.01 mm):" % (p_["x"], p_["y"], p_["z"], p_["deviation"], p_["neighbour_median"]))
+            w("   * (%.2f, %.2f) = %.4f mm, %+.3f mm vs. neighbour median %.4f mm. Your note: this dip was measured twice "
+              "(−0.956875, then −0.938750); its physical depth is not independently confirmed. In the supplied older mesh (141253) the same "
+              "probe point read −0.463125 mm and no point deviated. Copies depending on it (> 0.01 mm):"
+              % (p_["x"], p_["y"], p_["z"], p_["deviation"], p_["neighbour_median"]))
             for x in plan["affected_by_outliers"]:
                 if x["point"] == [p_["x"], p_["y"]]:
                     w("     * %s — first layer up to %.3f mm, foundation top up to %.3f mm: %s" % (x["copy"], x["first_layer_dz_max"], x["foundation_top_dz_max"], x["effect"]))
-        w("   → Please check the bed at these point(s) before printing; after a new mesh the file is regenerated.")
+        w("   → Kept as measured. Before printing: confirm the bed shape at this point (or exclude those copies with a smaller count/layout).")
     w("2. **Profile freshness cannot be proven** from the archive (all entries carry the same timestamp). Mesh 2026-11-13 14:37 and offsets from "
       "the Nov 12 snapshot are assumed current.")
     w("3. Prime lines lie at y < 5 mm, outside the measured mesh (edge row is used, as Klipper does).")
     w("")
     w("## 7. Negative and regeneration cases")
+    w("")
+    w("Verifier mutation cases on the real candidate (must be rejected):")
+    w("")
+    w("| Case | Exit | Diagnostics | Rejected as expected |")
+    w("|---|---|---|---|")
+    for n in vneg:
+        w("| %s | %d | %s | %s |" % (n["case"], n["exit_code"], ", ".join(n["error_codes"]), n["passed"]))
+    w("")
+    w("Adversarial unit tests additionally mutate a synthetic output (missing/changed/over-limit acceleration, missing/changed pressure "
+      "advance, narrowed and crossing park trajectories, ARRIVING and Y profiles, lowered transfer, removed or duplicated model moves, "
+      "first layer too low, changed feedrate, missing heater shutdown / final park / unsync, over-temperature, cold extrusion, unknown "
+      "command, stacked runtime mesh) and the planner (extreme offsets, steep mesh, implausible offsets, negative park margin).")
     w("")
     w("| Case | Exit | G-code written | Diagnostics |")
     w("|---|---|---|---|")
@@ -214,7 +275,7 @@ def main():
     w("## 8. Reproduce")
     w("")
     w("```")
-    w("python3 tools/run_acceptance.py --fixtures <folder with single_shark.gcode, profile.zip, reference_40.gcode> --out <out>")
+    w("python3 tools/run_acceptance.py --fixtures <folder with single_shark.gcode, profile.zip, reference_40.gcode> --historical <folder with historical_foundations.txt, old_mesh.cfg> --out <out>")
     w("python3 tools/write_report.py --acceptance <out> --out REPORT.md")
     w("```")
     w("")
@@ -223,13 +284,11 @@ def main():
     w("")
     w("## 9. Open questions")
     w("")
-    if dev:
-        w("1. Is the bed really as measured at %s? (decides %s)" % (", ".join("(%.2f, %.2f)" % (p_["x"], p_["y"]) for p_ in dev),
-          ", ".join(sorted({x["copy"] for x in plan["affected_by_outliers"] if x["first_layer_dz_max"] > 0.05}))))
-    w("2. Which parked-head discrepancy did you observe on the oracle print (time/phase)? The park table above can be matched to it.")
-    w("3. Keep the T2 right-then-left park for parity, or allow a direct T2 move in milestone 2?")
-    w("4. OK to keep the slicer's end-of-part wipes and the non-overlapping prime lanes (differences 1–2 above)?")
-    w("5. Foundation E: which rule did the reviewed file use for layers 2–%d (open finding in section 3)?" % plan["foundation_layers"])
+    w("1. Can T1's position be checked physically before and after the T3-arrange move (line of 'arrange T3' in section 4)? Should "
+      "`--park-margin` (e.g. 2 mm) become the default once confirmed?")
+    w("2. Is the dip at the deviating mesh point physically confirmed? Until then the dependent copies stay flagged.")
+    w("3. Keep the direct flow-area method for foundation E (production), with the historical remesh only as a parity explanation?")
+    w("4. Keep the T2 right-then-left park for parity, or allow a direct T2 move in milestone 2?")
     with open(a.out, "w") as f:
         f.write("\n".join(L) + "\n")
     print("wrote", a.out)

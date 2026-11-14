@@ -36,16 +36,20 @@ python3 -m quadro_studio preview  --slice MODEL.gcode --profile PRINTER.zip [--c
 * Layout options: `--count` (multiple of 4), `--preset reference-300|auto`,
   `--sync-pitch`, `--cols-per-zone`, `--col-pitch`, `--row-pitch`,
   `--min-gap`, `--foundation-layers`, `--standby-temp`,
-  `--travel-clearance`, `--max-segment`. The named preset `reference-300` is the
+  `--travel-clearance`, `--max-segment`, `--park-margin` (extra mm above the minimum carriage
+  clearance for stacked parks; default 0 = reference parity). The named preset `reference-300` is the
   reviewed 8×5 layout (72 mm head spacing, 35 mm column shift, 58 mm rows,
   centred on the bed). `auto` derives pitches from the model footprint; it is
   checked by the same rules but makes no claim of optimal packing. To get more
   or smaller copies, re-slice a smaller model — G-code is never scaled.
 
+What each verification check proves — and does not prove — is listed in `CHECKS.md`.
+
 Acceptance run (reproduces every number in REPORT.md):
 
 ```
-python3 tools/run_acceptance.py --fixtures FIXTURE_DIR --out OUT_DIR
+python3 tools/run_acceptance.py --fixtures FIXTURE_DIR [--historical HIST_DIR] --out OUT_DIR
+python3 tools/write_report.py --acceptance OUT_DIR --out REPORT.md
 QUADRO_FIXTURES=FIXTURE_DIR python3 -m unittest discover -s tests -v
 ```
 
@@ -85,7 +89,7 @@ firmware retraction, one object, T0 only, by-layer sequence.
 | `M73`, `SET_PRINT_STATS_INFO` | progress metadata, regenerated |
 | `TIMELAPSE_TAKE_PHOTO` | dropped (it would park the toolhead mid-print) |
 | zero-length `G1 … E0` | no-op, dropped |
-| anything else (`G2/G3`, `G91`, `M82`, `G10/G11`, `T1-T3`, unknown macros, motion outside an object block, …) | **rejected** |
+| anything else (`G2/G3`, `G91`, `M82`, `G10/G11`, `T1-T3`, `M600`, `EXCLUDE_OBJECT_*`, unknown macros, motion outside an object block, …) | **rejected**, the message names the exact limitation |
 
 Model paths are separated from slicer set-up/purge/end moves by the object
 markers: each layer's *model block* runs from the first extrusion of the object
@@ -104,9 +108,12 @@ _PRINT_HOME`. Assumptions (not executable offline, listed in REPORT.md):
 * `_PRINT_HOME TEMP BED_TEMP` homes all axes and Z at X150 Y150, leaves T0
   primary/active with zero G-code offset and the runtime mesh cleared;
   homing's `QUADRO_DISTRIBUTE_X` leaves T0=150, T1=356.5, T2=412.75, T3=469.
-* `QUADRO_PARALLEL_MOVE` (no `ARRIVING`) moves all carriages as affine
-  functions of one master trajectory, so checking clearance at start and target
-  is sufficient (statement of the firmware module).
+* `QUADRO_PARALLEL_MOVE` is used and accepted by the verifier only in the
+  non-ARRIVING, X-only form; as in the supplied firmware's `_execute_parallel_move`
+  the largest-displacement carriage is driven and the others follow scaled, so all
+  carriages are affine in one progress variable. `ARRIVING`, `PLAN_ONLY`, `Y`, `Z`
+  are rejected as unverified motion profiles.
+* All end positions are *parked* at the endstop coordinates; nothing is re-homed.
 * `SET_DUAL_CARRIAGE … MODE=COPY` copies the primary's X motion with the
   carriage offset present at that moment; `SYNC_EXTRUDER_MOTION` keeps each
   extruder's own rotation distance and pressure advance.
@@ -117,5 +124,6 @@ _PRINT_HOME`. Assumptions (not executable offline, listed in REPORT.md):
 ```
 quadro_studio/  mesh.py profile.py slicer.py plan.py generate.py verify.py preview.py cli.py
 tests/          unit, negative and end-to-end tests (+ synthetic, non-private inputs)
-tools/          run_acceptance.py, audit_run.py
+tools/          run_acceptance.py, audit_run.py, write_report.py, build_bundle.py,
+                historical_e_check.py (test-only; reads historical private assets given on the command line)
 ```

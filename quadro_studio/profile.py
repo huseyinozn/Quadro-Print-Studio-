@@ -213,6 +213,7 @@ class Extruder:
     max_temp: float
     max_extrude_only_distance: float
     fan: str
+    max_extrude_cross_section: float = 0.64
 
 
 @dataclass
@@ -346,7 +347,8 @@ def load_profile(path, mesh_name=None, offsets_file=None):
         extruders[t] = Extruder(t, name, _f(s, "nozzle_diameter", diags, name), _f(s, "filament_diameter", diags, name),
                                 _f(s, "rotation_distance", diags, name), _f(s, "min_extrude_temp", diags, name, 170.0),
                                 _f(s, "max_temp", diags, name), _f(s, "max_extrude_only_distance", diags, name, 50.0),
-                                fan)
+                                fan, _f(s, "max_extrude_cross_section", diags, name,
+                                        4.0 * (_f(s, "nozzle_diameter", diags, name) or 0.4) ** 2, required=False))
     yc = sections["carriage carriage_y"]
     zc = sections["carriage carriage_z"]
     pr = sections["printer"]

@@ -268,7 +268,7 @@ class FarmGenerator:
         out("SET_GCODE_OFFSET X=0 Y=0 Z=0 MOVE=0")
         self.g1(z=o["start_z"], f=900)
         out("M190 S%s" % _fmt(bed, 0))
-        self.qpm(plan.park_home, "home")
+        self.qpm(plan.park_home, "park-at-endstop-positions")
         for t in range(4):
             out("M104 T%d S%s" % (t, _fmt(o["standby_temp"], 0)))
             out("SET_PRESSURE_ADVANCE EXTRUDER=%s ADVANCE=%s" % (EXTR[t], repr(m.pressure_advance)))
@@ -330,7 +330,7 @@ class FarmGenerator:
             self.retract([a], self.toolchange_retract - self.level[a])
             zp = self.safe_z([0, 1, 2, 3], o["park_clearance"])
             self.lift_to(zp)
-            self.qpm(plan.park_home, "home-after-T%d" % a)
+            self.qpm(plan.park_home, "park-after-T%d" % a)
             if a < 3:
                 out("M104 T%d S%s" % (a, _fmt(o["standby_temp"], 0)))
 
@@ -380,7 +380,7 @@ class FarmGenerator:
         out("M83")
         for t in (1, 2, 3):
             out("SET_DUAL_CARRIAGE CARRIAGE=carriage_t%d MODE=INACTIVE" % t)
-        self.qpm(plan.park_home, "home-final")
+        self.qpm(plan.park_home, "final-park")
         out("TURN_OFF_HEATERS")
         for t in range(4):
             out("SET_FAN_SPEED FAN=%s SPEED=0" % p.extruders[t].fan)

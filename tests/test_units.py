@@ -181,6 +181,22 @@ class SliceTests(unittest.TestCase):
     def test_unknown_motion_rejected(self):
         self.assert_rejects("SLICE_UNKNOWN_MOTION", extra_lines=["G1 X10 Y10 F3000"])
 
+    def test_exclude_object_limitation_named(self):
+        with self.assertRaises(StageError) as cm:
+            load_slice(self.slice_with(layer_extra=lambda L: ["EXCLUDE_OBJECT_START NAME=box"] if L == 2 else []))
+        self.assertIn("EXCLUDE_OBJECT_START", str(cm.exception))
+        self.assertIn("object exclusion would cancel one copy", str(cm.exception))
+
+    def test_filament_change_limitation_named(self):
+        with self.assertRaises(StageError) as cm:
+            load_slice(self.slice_with(layer_extra=lambda L: ["M600"] if L == 3 else []))
+        self.assertIn("filament change pauses one head", str(cm.exception))
+
+    def test_unknown_macro_limitation_named(self):
+        with self.assertRaises(StageError) as cm:
+            load_slice(self.slice_with(layer_extra=lambda L: ["MY_SECRET_MACRO A=1"] if L == 2 else []))
+        self.assertIn("unknown semantics", str(cm.exception))
+
     def test_temperature_change_rejected(self):
         self.assert_rejects("SLICE_UNSUPPORTED_FEATURE", layer_extra=lambda L: ["M104 S230"] if L == 5 else [])
 

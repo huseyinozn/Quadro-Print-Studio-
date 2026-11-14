@@ -47,7 +47,7 @@ def _jsonable(o):
 def _layout_opts(a):
     o = LayoutOptions(count=a.count, preset=a.preset)
     for k in ("sync_pitch", "cols_per_zone", "col_pitch", "row_pitch", "min_gap", "foundation_layers",
-              "standby_temp", "travel_clearance", "max_segment"):
+              "standby_temp", "travel_clearance", "max_segment", "park_margin"):
         v = getattr(a, k, None)
         if v is not None:
             setattr(o, k, v)
@@ -73,6 +73,8 @@ def _add_layout(p):
     p.add_argument("--standby-temp", dest="standby_temp", type=float)
     p.add_argument("--travel-clearance", dest="travel_clearance", type=float)
     p.add_argument("--max-segment", dest="max_segment", type=float)
+    p.add_argument("--park-margin", dest="park_margin", type=float,
+                   help="extra mm above the minimum carriage clearance for stacked parks (default 0 = reference parity)")
 
 
 def load_inputs(a, diags):
