@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# private machine data and large outputs are never committed
+fixtures/
+*.gcode
+*.zip
+review_out/
