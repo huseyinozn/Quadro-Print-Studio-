@@ -17,6 +17,20 @@ calls an AI service.
 * Python ≥ 3.9 (tested with 3.13). **No third-party packages.**
 * Optional: nothing else. Tests use the standard `unittest` module.
 
+## Web app (Farm Mode)
+
+```
+python3 -m quadro_studio.web            # http://127.0.0.1:8765  (add --host 0.0.0.0 to open it from a phone on the same network)
+```
+
+Upload the printer profile ZIP and one sliced model, choose the number of copies
+(multiple of 4), check the layout, then *Generate and verify*. The layout is computed
+from the model's own size (`preset auto`); if the count does not fit, the page says why
+and offers the largest count for which the full layout checks pass. The generated file
+is verified by a separate `verify` process; only a file that passed, and whose SHA-256
+still equals the verified hash, can be downloaded. Changing any input starts a new job;
+old results are hidden. No API key, no printer connection, no external service.
+
 ## Command line
 
 ```
@@ -123,7 +137,9 @@ _PRINT_HOME`. Assumptions (not executable offline, listed in REPORT.md):
 
 ```
 quadro_studio/  mesh.py profile.py slicer.py plan.py generate.py verify.py preview.py cli.py
+  web/          server.py (stdlib HTTP), messages.py (plain-English results), static/ (index.html, app.js, style.css)
 tests/          unit, negative and end-to-end tests (+ synthetic, non-private inputs)
-tools/          run_acceptance.py, audit_run.py, write_report.py, build_bundle.py,
+tools/          e2e_web.js (browser end-to-end, Playwright), serve_with_fault.py (test-only fault injection),
+                run_acceptance.py, audit_run.py, write_report.py, build_bundle.py,
                 historical_e_check.py (test-only; reads historical private assets given on the command line)
 ```

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quadro Print Studio</title>
+<meta name="description" content="Prepare multi-head prints for the Co Print Quadro.">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <span class="brand">Quadro Print Studio</span>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <h1>One model in. Four heads at work.</h1>
+    <p>Turn a single sliced model into a print for all four heads of your Quadro. Everything runs on this computer; nothing is sent to your printer.</p>
+  </section>
+
+  <section aria-labelledby="modes-h">
+    <h2 id="modes-h" class="sr">Modes</h2>
+    <div class="modes">
+      <article class="mode on" aria-current="true">
+        <div class="mode-h"><h3>Farm Mode</h3><span class="tag ok">Available</span></div>
+        <p>Many identical copies of one single-colour model, printed by four synchronized heads.</p>
+      </article>
+      <article class="mode off" aria-disabled="true">
+        <div class="mode-h"><h3>Copy Mode</h3><span class="tag soon">Coming soon</span></div>
+        <p>Print the same model on several heads at once.</p>
+      </article>
+      <article class="mode off" aria-disabled="true">
+        <div class="mode-h"><h3>Dual Color Copy Mode</h3><span class="tag soon">Coming soon</span></div>
+        <p>Two-colour models, duplicated across heads.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="card" id="farm" aria-labelledby="farm-h">
+    <h2 id="farm-h">Farm Mode</h2>
+    <ol class="steps">
+      <li>
+        <label for="profile" class="step-l"><span class="n">1</span>Printer profile</label>
+        <p class="help">The ZIP of your Quadro's current configuration, including the saved bed mesh and tool offsets.</p>
+        <input type="file" id="profile" accept=".zip,application/zip">
+      </li>
+      <li>
+        <label for="model" class="step-l"><span class="n">2</span>Sliced model</label>
+        <p class="help">G-code of one single-colour model from Co Print Slicer, sliced once for T0.</p>
+        <input type="file" id="model" accept=".gcode,.gco,.txt">
+      </li>
+      <li>
+        <label for="count" class="step-l"><span class="n">3</span>Copies</label>
+        <p class="help">A multiple of 4: each of the four heads prints the same number of copies.</p>
+        <div class="stepper">
+          <button type="button" id="minus" aria-label="Fewer copies">−</button>
+          <input type="number" id="count" value="40" min="4" max="400" step="4" inputmode="numeric">
+          <button type="button" id="plus" aria-label="More copies">+</button>
+        </div>
+      </li>
+    </ol>
+    <button type="button" class="primary" id="check" disabled>Check layout</button>
+    <p class="status" id="plan-status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="card hidden" id="layout-card" aria-labelledby="layout-h">
+    <div class="row-h"><h2 id="layout-h">Layout</h2><span class="sub" id="layout-sub"></span></div>
+    <div class="phases" role="tablist" id="phases"></div>
+    <p class="phase-note" id="phase-note"></p>
+    <div class="bed-wrap"><svg id="bed" role="img" aria-label="Bed layout preview"></svg></div>
+    <div class="legend" id="legend"></div>
+    <ul class="warn" id="warnings"></ul>
+    <details class="checks"><summary>Layout checks</summary><ul id="checklist"></ul></details>
+    <button type="button" class="primary" id="generate">Generate and verify</button>
+    <p class="status" id="gen-status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="card hidden" id="reject-card" aria-labelledby="reject-h">
+    <h2 id="reject-h">This selection can't be printed</h2>
+    <ul class="problems" id="problems"></ul>
+    <div id="alt" class="alt hidden">
+      <p id="alt-text"></p>
+      <button type="button" class="secondary" id="use-alt"></button>
+    </div>
+  </section>
+
+  <section class="card hidden" id="result-card" aria-labelledby="result-h">
+    <h2 id="result-h"></h2>
+    <div id="result-body"></div>
+  </section>
+
+  <section class="notes">
+    <h2>Good to know</h2>
+    <ul>
+      <li>The layout is calculated from your model's size and your printer's measured bed. Bigger models fit fewer copies; models are never scaled.</li>
+      <li>Layers 1–5 are printed by each head on its own, so every head starts exactly on the measured bed. From layer 6 on, all four heads print together.</li>
+      <li>Every file is checked by a separate verification step before it can be downloaded. Passing these software checks does not mean the file was tested on your printer.</li>
+    </ul>
+  </section>
+</main>
+<footer class="wrap foot">Quadro Print Studio · Farm Mode</footer>
+<script src="/app.js"></script>
+</body>
+</html>

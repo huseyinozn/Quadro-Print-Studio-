@@ -207,6 +207,69 @@ def _stacks(prof, margin=0.0):
     return home, left, right
 
 
+def purge_band_top(model, o, first_layer=None):
+    """Highest y (mm) occupied by the two front prime-line lanes."""
+    h = first_layer or model.blocks[0].z
+    w = o["purge_e_per_mm"] * math.pi * (model.config["filament_diameter"] / 2) ** 2 / h
+    laneA = w / 2.0 + 0.1
+    laneB = laneA + w + o["purge_lane_gap"]
+    return laneB + w / 2.0
+
+
+def auto_layout(model, prof, o, k):
+    """Model-size-driven layout search (no fixed reference grid).
+
+    Pitches come from the model's whole motion envelope plus a uniform gap g.
+    g is searched from 5 mm down to ``min_gap``; for each g the column count per
+    head zone is tried from 1 upwards. The first arrangement that fits the
+    measured mesh area (minus the prime-line band) with the four COPY carriages
+    at least ``min_clearance`` apart wins, i.e. the largest gap is preferred.
+    Returns (cols, sync, col_pitch, row_pitch, centre_x, centre_y) or None.
+    The full plan checks still run on the result; this is not optimal packing."""
+    mesh = prof.mesh
+    bed = [float(v) for p in model.config["printable_area"].split(",") for v in p.split("x")] if model.config["printable_area"] else [0, 0, 300, 0, 300, 300, 0, 300]
+    bx0, by0, bx1, by1 = min(bed[0::2]), min(bed[1::2]), max(bed[0::2]), max(bed[1::2])
+    ux0, ux1 = max(bx0, mesh.min_x), min(bx1, mesh.max_x)
+    uy0 = max(by0, mesh.min_y, purge_band_top(model, o) + 1.0)
+    uy1 = min(by1, mesh.max_y)
+    ex0, ey0, ex1, ey1 = model.bbox_extrude
+    mx0, my0, mx1, my1 = model.bbox_motion
+    W = max(ex1 - ex0, mx1 - mx0)
+    H = max(ey1 - ey0, my1 - my0)
+    oxs = [prof.offsets[t].x for t in range(4)]
+    oys = [prof.offsets[t].y for t in range(4)]
+    need_sync = prof.min_clearance + max(0.0, max(oxs[t] - oxs[t + 1] for t in range(3)))
+    dy = max(oys) - min(oys)          # copies of different heads are shifted in Y by their offsets
+    g = 5.0
+    while g >= o["min_gap"] - 1e-9:
+        for cols in range(1, k + 1):
+            rows = int(math.ceil(k / float(cols)))
+            cp, rp = W + g, H + g
+            sync = max(need_sync, (cols - 1) * cp + W + g)
+            span_x = 3 * sync + (cols - 1) * cp + W
+            span_y = (rows - 1) * rp + H + dy
+            if span_x <= (ux1 - ux0) - 1e-9 and span_y <= (uy1 - uy0) - 1e-9:
+                return (cols, sync, cp, rp, 0.5 * (ux0 + ux1), 0.5 * (uy0 + uy1))
+        g -= 0.25
+    return None
+
+
+def suggest_count(model, prof, opts, requested):
+    """Largest multiple of 4 below ``requested`` for which a full plan passes."""
+    from dataclasses import replace
+    c = (requested // 4) * 4
+    if c == requested:
+        c -= 4
+    while c >= 4:
+        o2 = replace(opts, count=c)
+        if opts.preset != "auto" or auto_layout(model, prof, o2.resolved(), c // 4) is not None:
+            plan, d = make_plan(model, prof, o2)
+            if plan is not None and d.ok():
+                return c, plan
+        c -= 4
+    return None, None
+
+
 def make_plan(model, prof, opts: LayoutOptions):
     diags = Diagnostics()
     o = opts.resolved()
@@ -263,25 +326,15 @@ def make_plan(model, prof, opts: LayoutOptions):
     cyb = o["center_y"] if o["center_y"] is not None else 0.5 * (by0 + by1)
 
     if o["preset"] == "auto":
-        gap = o["min_gap"] + 3.0
-        cp = W + gap
-        rp = H + gap
-        oxs = [offs[t][0] for t in range(4)]
-        need_sync = prof.min_clearance + max(0.0, max(oxs[t] - oxs[t + 1] for t in range(3)))
-        choice = None
-        for cols in range(1, k + 1):
-            rows = int(math.ceil(k / float(cols)))
-            sync = max(need_sync, (cols - 1) * cp + W + gap)
-            span_x = 3 * sync + (cols - 1) * cp + W
-            span_y = (rows - 1) * rp + H
-            if span_x <= (ux1 - ux0) and span_y <= (uy1 - uy0):
-                choice = (cols, sync, cp, rp)
-                break
+        choice = auto_layout(model, prof, o, k)
         if choice is None:
-            diags.error("PLAN_DOES_NOT_FIT", "%d copies of a %.1f x %.1f mm footprint do not fit the measured bed area" % (n, W, H),
-                        "Request fewer copies (multiple of 4) or re-slice a smaller model; G-code is never scaled.")
+            diags.error("PLAN_DOES_NOT_FIT",
+                        "%d copies of a %.1f x %.1f mm model do not fit the measured bed area with at least %.1f mm between copies"
+                        % (n, W, H, o["min_gap"]),
+                        "Choose fewer copies (a multiple of 4) or re-slice a smaller model; G-code is never scaled.")
             return None, diags
-        o["cols_per_zone"], o["sync_pitch"], o["col_pitch"], o["row_pitch"] = choice
+        o["cols_per_zone"], o["sync_pitch"], o["col_pitch"], o["row_pitch"], cxb, cyb = choice
+        o["center_x"], o["center_y"] = cxb, cyb
     cols = min(int(o["cols_per_zone"]), k)
     sync = float(o["sync_pitch"])
     cp = float(o["col_pitch"])
