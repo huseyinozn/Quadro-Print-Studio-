@@ -11,6 +11,11 @@ def fmt(v, nd=4):
     return ("%%.%df" % nd) % v
 
 
+CAUSE = ("Cause **not verified — open finding**. Rules tested on the largest-difference move without reproducing the oracle value: "
+         "flow-area or linear thickness ratio at piece midpoints, at piece end points or start points, and the surface of another head. "
+         "The oracle's implied linear thickness there is 0.1432 mm while both files command the same Z.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--acceptance", required=True)
@@ -80,7 +85,7 @@ def main():
     w("| E per move where no compensation applies (L1, L≥%d) | exact | %.1e rel |" % (plan["foundation_layers"] + 1, tol["e_exact_rel"]))
     w("| F per move | 0 mismatches | exact |")
     w("| Layer-1 nozzle height above measured bed (%d points) | max dev %s mm | %s mm |" % (cs["first_layer_points"], fmt(cs["first_layer_max_dev"], 6), tol["first_layer"]))
-    w("| Foundation E vs A(h_measured,w) (%d moves) | max %.2f %% | %.0f %% |" % (cs["e_found_checked"], 100 * cs["e_found_max_dev"], 100 * tol["e_found_rel"]))
+    w("| Foundation E vs A(h_measured,w) (%d moves) | max %.2f %% | %.1f %% (from thickness estimator, not from the oracle) |" % (cs["e_found_checked"], 100 * cs["e_found_max_dev"], 100 * tol["e_found_rel"]))
     w("| Measured local thickness, all layers (%d samples) | %s–%s mm | foundation %s–%s |" % (cs["thickness_checked"], fmt(cs["h_meas_min"], 4), fmt(cs["h_meas_max"], 4), fmt(fst["limits"][0], 2), fmt(fst["limits"][1], 2)))
     w("| COPY layers thickness vs 0.20 | max dev %s mm | %s mm |" % (fmt(cs["copy_thick_max_dev"], 4), tol["thickness_nominal"]))
     w("| Foundation top: one commanded Z for the 4 heads of a group | spread %s mm | %s mm |" % (fmt(c["foundation_common_z_max_spread"], 6), tol["copy_common_z"]))
@@ -106,12 +111,20 @@ def main():
     w("* Z at every aligned slicer endpoint: max |Δ| **%s mm** (tolerance %s), worst at head T%d layer %d slicer line %d."
       % (fmt(cm["z_max_abs_delta"], 5), tol["oracle_z"], cm["worst"]["z"]["where"]["nozzle"], cm["worst"]["z"]["where"]["layer"], cm["worst"]["z"]["where"]["slicer_line"]))
     er = cm["e_ratio_minus_1"]
-    w("* E: layer 1 and layers ≥%d identical (max %.1e). Foundation layers 2–%d: candidate/oracle −1 per head %s; %d moves outside ±3 %%. "
-      "The oracle's foundation E formula could not be recovered exactly; the oracle itself deviates up to %.1f %% from the flow-area rule "
-      "(%d moves > 3 %%), the candidate %.2f %%."
-      % (plan["foundation_layers"] + 1, cm["worst"]["e_exact"]["value"], plan["foundation_layers"],
-         ", ".join("%s [%+.3f, %+.3f]" % (k.split("/")[1], v[0], v[1]) for k, v in er.items() if k.startswith("L2")),
-         cm["e_outside_tol"], 100 * abs(os_["e_found_max_dev"]), o["issue_counts"].get("FOUNDATION_FLOW", 0), 100 * abs(cs["e_found_max_dev"])))
+    we = cm["worst"]["e_found"]["where"]
+    w("* E in layer 1 and layers ≥%d: identical within %.1e (rounding)." % (plan["foundation_layers"] + 1, abs(cm["worst"]["e_exact"]["value"])))
+    w("* **Open finding — foundation E (layers 2–%d).** No tolerance is applied to this difference: the oracle's foundation E rule "
+      "could not be recovered, so neither file is accepted as the reference for it. Per head, candidate/oracle − 1: %s."
+      % (plan["foundation_layers"], "; ".join("%s %+.2f %%..%+.2f %% (%d of %d moves >1 %%, %d >2 %%)" % (k.split("/")[1], 100 * v["min"], 100 * v["max"], v["over_1pct"], v["moves"], v["over_2pct"])
+                                          for k, v in er.items() if k.startswith("L2"))))
+    w("  * Largest difference: head **%s**, layer **%d**, slicer line **%d** (%s, width %.3f mm, slicer E %.5f mm): "
+      "oracle **%.6f mm**, candidate **%.6f mm** (candidate − oracle %+.6f mm, %+.2f %%). Commanded nozzle Z there: candidate %.5f, oracle %.5f."
+      % (we["head"], we["layer"], we["slicer_line"], we["feature"], we["width"], we["slicer_e_mm"], we["oracle_e_mm"], we["candidate_e_mm"],
+         we["candidate_minus_oracle_mm"], 100 * cm["worst"]["e_found"]["value"], we["candidate_tip_z"], we["oracle_tip_z"]))
+    w("  * Same Z in both files, so the difference is only the E rule. The candidate follows A(h,w)/A(0.2,w) at the local thickness "
+      "(independently re-measured: max %.2f %%, tolerance %.1f %% derived from the thickness estimator). The oracle deviates from that rule "
+      "by up to %.2f %%. %s"
+      % (100 * abs(cs["e_found_max_dev"]), 100 * tol["e_found_rel"], 100 * abs(os_["e_found_max_dev"]), CAUSE))
     w("")
     w("Intentional differences (candidate vs oracle):")
     w("")
@@ -120,7 +133,8 @@ def main():
       "each head prints over the previous line). Candidate: same amount (E15/100 mm, from the profile's `start_print`), two lanes "
       "y = %.2f / %.2f, left/right halves, no overlap, %.2f mm from the first copies."
       % ([p["start"][1] for p in o["purges"]], o["purges"][0]["width_est"], len(po), po[0]["overlap_mm"] if po else 0,
-         plan["purge"]["0"]["y"], plan["purge"]["2"]["y"], 6.459 - plan["purge"]["2"]["y"] - plan["purge"]["width_est"] / 2))
+         plan["purge"]["0"]["y"], plan["purge"]["2"]["y"],
+         min(pt[1] for h in plan["footprints"].values() for pt in h) - plan["purge"]["2"]["y"] - plan["purge"]["width_est"] / 2))
     w("2. **End-of-part wipe.** The oracle replaces the slicer's wipe after each part (%d head-visits) by a stationary 0.4 mm retract; "
       "the candidate keeps the slicer wipe (same total retraction)." % o["trailer_differs"])
     w("3. **Transfer height.** Oracle: z_layer + 1.2 mm; candidate: highest deposit + head z-offset + 1.0 mm. Minimum measured clearance "
@@ -165,14 +179,18 @@ def main():
     w("")
     w("## 6. Physical uncertainties that need your decision")
     w("")
-    w("1. **Mesh outlier preserved, not repaired.** Probe point (258.75, 295.00) = −0.939 mm, 0.52 mm below its neighbours. "
-      "If it is a real dip the copies are correct; if it is a probing error, the first layer of:")
-    for x in plan["affected_by_outliers"]:
-        if x["first_layer_dz_max"] > 0.05:
-            w("   * %s — %s" % (x["copy"], x["first_layer_if_probe_error"]))
-    others = [x["copy"] for x in plan["affected_by_outliers"] if x["first_layer_dz_max"] <= 0.05]
-    w("   * and the foundation tops of %s shift by up to %.2f mm (shared COPY Z)." % (", ".join(others), max(x["foundation_top_dz_max"] for x in plan["affected_by_outliers"])))
-    w("   → Please re-probe that corner (or confirm the dip) before printing; the tool will regenerate from the new mesh.")
+    dev = plan.get("mesh_deviating_points", [])
+    if not dev:
+        w("1. No saved mesh point deviates markedly from its neighbours (threshold %.2f mm); no copy is flagged." % plan["options"]["outlier_threshold"])
+    else:
+        w("1. **Mesh points that deviate markedly from their neighbours** (this printer's mesh, threshold %.2f mm; values used unchanged):"
+          % plan["options"]["outlier_threshold"])
+        for p_ in dev:
+            w("   * (%.2f, %.2f) = %.4f mm, %+.3f mm vs. neighbour median %.4f mm. Copies depending on it (> 0.01 mm):" % (p_["x"], p_["y"], p_["z"], p_["deviation"], p_["neighbour_median"]))
+            for x in plan["affected_by_outliers"]:
+                if x["point"] == [p_["x"], p_["y"]]:
+                    w("     * %s — first layer up to %.3f mm, foundation top up to %.3f mm: %s" % (x["copy"], x["first_layer_dz_max"], x["foundation_top_dz_max"], x["effect"]))
+        w("   → Please check the bed at these point(s) before printing; after a new mesh the file is regenerated.")
     w("2. **Profile freshness cannot be proven** from the archive (all entries carry the same timestamp). Mesh 2026-11-13 14:37 and offsets from "
       "the Nov 12 snapshot are assumed current.")
     w("3. Prime lines lie at y < 5 mm, outside the measured mesh (edge row is used, as Klipper does).")
@@ -205,10 +223,13 @@ def main():
     w("")
     w("## 9. Open questions")
     w("")
-    w("1. Is the −0.939 mm corner point real? (decides T3 copies 8/9)")
+    if dev:
+        w("1. Is the bed really as measured at %s? (decides %s)" % (", ".join("(%.2f, %.2f)" % (p_["x"], p_["y"]) for p_ in dev),
+          ", ".join(sorted({x["copy"] for x in plan["affected_by_outliers"] if x["first_layer_dz_max"] > 0.05}))))
     w("2. Which parked-head discrepancy did you observe on the oracle print (time/phase)? The park table above can be matched to it.")
     w("3. Keep the T2 right-then-left park for parity, or allow a direct T2 move in milestone 2?")
     w("4. OK to keep the slicer's end-of-part wipes and the non-overlapping prime lanes (differences 1–2 above)?")
+    w("5. Foundation E: which rule did the reviewed file use for layers 2–%d (open finding in section 3)?" % plan["foundation_layers"])
     with open(a.out, "w") as f:
         f.write("\n".join(L) + "\n")
     print("wrote", a.out)

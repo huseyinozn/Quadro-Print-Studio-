@@ -438,10 +438,10 @@ def profile_checks(prof: Profile, diags: Diagnostics):
     mesh = prof.mesh
     outs = mesh.outliers()
     for o in outs:
-        diags.warning("MESH_OUTLIER", "saved mesh point (%.2f, %.2f) = %.4f deviates %.3f mm from its neighbours"
-                      % (o["x"], o["y"], o["z"], o["deviation"]),
-                      "Preserved as measured (never auto-repaired). Affected copies are listed in the plan; "
-                      "re-probe the bed if this is a probing error.", ix=o["ix"], iy=o["iy"])
+        diags.warning("MESH_DEVIATING_POINT", "saved mesh point (%.2f, %.2f) = %.4f mm deviates markedly (%.3f mm) from its "
+                      "neighbours' median" % (o["x"], o["y"], o["z"], o["deviation"]),
+                      "Used exactly as measured (never modified). Copies that depend on it are listed in the plan; "
+                      "check the bed at this point before printing.", ix=o["ix"], iy=o["iy"])
     # Klipper refuses meshes extending past the fade distance
     if prof.fade_end > prof.fade_start:
         zr = max(abs(min(min(r) for r in mesh.points)), abs(max(max(r) for r in mesh.points)))

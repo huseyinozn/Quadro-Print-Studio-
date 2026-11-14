@@ -84,15 +84,41 @@ class SyntheticPipeline(unittest.TestCase):
         self.assertAlmostEqual(plan2.zbase(1, 1, x, y) - plan1.zbase(1, 1, x, y), 0.05, places=9)
         self.assertAlmostEqual(plan2.zbase(1, 0, x, y) - plan1.zbase(1, 0, x, y), 0.0, places=9)
 
-    def test_outlier_preserved_and_reported(self):
-        meshes = [synth_profile.mesh_block(outlier=((4, 4), -0.6))]
-        p3 = synth_profile.build(os.path.join(self.tmp, "p3.zip"), meshes=meshes)
-        prof, _ = load_profile(p3)
-        self.assertAlmostEqual(prof.mesh.points[4][4], -0.6, places=6)   # preserved as measured, not repaired
+    def _plan_for(self, meshes, name):
+        prof, d0 = load_profile(synth_profile.build(os.path.join(self.tmp, name), meshes=meshes))
+        from quadro_studio.profile import profile_checks
+        profile_checks(prof, d0)
         model, _ = load_slice(self.slice)
         plan, d = make_plan(model, prof, LayoutOptions(count=8, preset="auto", foundation_layers=3))
+        return prof, plan, d0.render() + "\n" + d.render()
+
+    def test_no_deviating_point_no_warning(self):
+        prof, plan, text = self._plan_for([synth_profile.mesh_block()], "clean.zip")
+        self.assertEqual(plan.mesh_deviating_points, [])
+        self.assertEqual(plan.affected_by_outliers, [])
+        self.assertNotIn("MESH_DEVIATING_POINT", text)
+        self.assertNotIn("PLAN_DEVIATING_POINT_AFFECTS_COPIES", text)
+
+    def test_one_deviating_point_kept_and_reported(self):
+        prof, plan, text = self._plan_for([synth_profile.mesh_block(outlier=((4, 4), -0.6))], "one.zip")
+        self.assertAlmostEqual(prof.mesh.points[4][4], -0.6, places=6)   # base surface is 0 at (150,150); value kept as measured
+        self.assertEqual([(p["ix"], p["iy"]) for p in plan.mesh_deviating_points], [(4, 4)])
         self.assertTrue(plan.affected_by_outliers)
-        self.assertIn("PLAN_OUTLIER_AFFECTED", d.render())
+        self.assertTrue(all(a["point"] == [150.0, 150.0] for a in plan.affected_by_outliers))
+        self.assertIn("MESH_DEVIATING_POINT", text)
+        self.assertIn("PLAN_DEVIATING_POINT_AFFECTS_COPIES", text)
+
+    def test_measured_value_unchanged(self):
+        base = synth_profile.mesh_block()
+        prof0, _ = load_profile(synth_profile.build(os.path.join(self.tmp, "b.zip"), meshes=[base]))
+        prof1, _ = load_profile(synth_profile.build(os.path.join(self.tmp, "c.zip"), meshes=[synth_profile.mesh_block(outlier=((2, 6), 0.5))]))
+        self.assertAlmostEqual(prof1.mesh.points[6][2] - prof0.mesh.points[6][2], 0.5, places=5)  # 6-decimal file format
+
+    def test_several_deviating_points_each_located(self):
+        meshes = [synth_profile.mesh_block(outlier=((1, 1), -0.5), extra_outliers=[((7, 7), 0.45)])]
+        prof, plan, text = self._plan_for(meshes, "two.zip")
+        pts = sorted((p["ix"], p["iy"]) for p in plan.mesh_deviating_points)
+        self.assertEqual(pts, [(1, 1), (7, 7)])
 
     def test_generation_reads_only_slice_and_profile(self):
         out = os.path.join(self.tmp, "iso.gcode")

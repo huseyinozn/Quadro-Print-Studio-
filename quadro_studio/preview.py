@@ -36,10 +36,10 @@ def render_svg(model, prof, plan, title="Quadro Print Studio - Farm Mode layout"
     for i in range(0, 301, 50):
         a('<text x="%.1f" y="%.1f" font-size="10" fill="#666" text-anchor="middle">%d</text>' % (X(i), Y(0) + 14, i))
         a('<text x="%.1f" y="%.1f" font-size="10" fill="#666" text-anchor="end">%d</text>' % (X(0) - 4, Y(i) + 3, i))
-    # mesh outliers
-    for o in m.outliers():
+    # mesh points that deviate markedly from their neighbours (this printer's data)
+    for o in plan.mesh_deviating_points:
         a('<circle cx="%.1f" cy="%.1f" r="7" fill="none" stroke="#dc2626" stroke-width="2"/>' % (X(o["x"]), Y(o["y"])))
-        a('<text x="%.1f" y="%.1f" font-size="10" fill="#dc2626" text-anchor="end">mesh outlier %.3f mm</text>' % (X(o["x"]) - 9, Y(o["y"]) + 18, o["z"]))
+        a('<text x="%.1f" y="%.1f" font-size="10" fill="#dc2626" text-anchor="end">deviating mesh point %.3f mm</text>' % (X(o["x"]) - 9, Y(o["y"]) + 18, o["z"]))
     affected = {(a_["tool"], a_["slot"]) for a_ in plan.affected_by_outliers if a_["first_layer_dz_max"] > 0.1}
     # purge lines
     for t in range(4):
@@ -81,9 +81,10 @@ def render_svg(model, prof, plan, title="Quadro Print Studio - Farm Mode layout"
         "Slot order: serpentine, reversed every layer",
         "Thick lines at front: prime line per head",
         "Dashed grey: measured mesh area",
-        "Red ring: preserved mesh outlier",
-        "Red dashed copy: depends on outlier",
-        "  being real (>0.1 mm first-layer effect)",
+        "Red ring: mesh point deviating from",
+        "  its neighbours (used as measured)",
+        "Red dashed copy: first layer depends",
+        "  on that point by > 0.1 mm",
         "",
         "Park positions (carriage X):",
         "  home %s" % ", ".join("T%d=%.2f" % (t, plan.park_home[t]) for t in range(4)),

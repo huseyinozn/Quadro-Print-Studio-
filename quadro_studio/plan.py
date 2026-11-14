@@ -114,6 +114,7 @@ class Plan:
     copy_range: tuple
     checks: list = field(default_factory=list)
     affected_by_outliers: list = field(default_factory=list)
+    mesh_deviating_points: list = field(default_factory=list)
     foundation_stats: dict = field(default_factory=dict)
     footprints: dict = field(default_factory=dict)
     validated_scope: str = ""
@@ -398,29 +399,41 @@ def make_plan(model, prof, opts: LayoutOptions):
         check("foundation_thickness", hmin <= glob[0] and glob[1] <= hmax,
               "foundation layer 2..%d local thickness %.4f..%.4f mm within [%.3f, %.3f]" % (F, glob[0], glob[1], hmin, hmax))
 
+    # Points that deviate markedly from their neighbours are evaluated on THIS
+    # printer's mesh (none, one or several may exist). Measured values are kept
+    # unchanged in the output; the comparison surface below (point replaced by its
+    # neighbour median) is used only to quantify which copies depend on the point.
     outs = mesh.outliers(o["outlier_threshold"])
     affected = []
-    if outs:
+    plan.mesh_deviating_points = outs
+    l1 = [m for m in model.blocks[0].moves() if m.kind == "extrude"]
+    lF = [m for m in model.blocks[F - 1].moves() if m.kind == "extrude"]
+    for ol in outs:
         pts = [list(r) for r in mesh.points]
-        for ol in outs:
-            pts[ol["iy"]][ol["ix"]] = ol["neighbour_median"]
+        pts[ol["iy"]][ol["ix"]] = ol["neighbour_median"]
         alt = BedMesh(pts, mesh.min_x, mesh.max_x, mesh.min_y, mesh.max_y, mesh.x_count, mesh.y_count,
-                      mesh.x_pps, mesh.y_pps, mesh.algo, mesh.tension, "outlier-replaced (analysis only)")
-        l1 = [m for m in model.blocks[0].moves() if m.kind == "extrude"]
-        lF = [m for m in model.blocks[F - 1].moves() if m.kind == "extrude"]
+                      mesh.x_pps, mesh.y_pps, mesh.algo, mesh.tension, "comparison only")
         for t in range(4):
             for s in slots:
                 d1 = max(abs(plan.S(t, m.x + s.dx, m.y + s.dy) - plan.S(t, m.x + s.dx, m.y + s.dy, alt)) for m in l1)
                 dF = max(abs(plan.zbase(F, t, m.x + s.dx, m.y + s.dy) - plan.zbase(F, t, m.x + s.dx, m.y + s.dy, alt)) for m in lF)
                 if d1 > 0.01 or dF > 0.01:
-                    affected.append(dict(copy="T%d/slot%d" % (t, s.index), tool=t, slot=s.index,
+                    if d1 > plan.layer_z[0] * 0.5:
+                        txt = ("first-layer nozzle height depends on this point by up to %.3f mm (nominal first layer %.2f mm); "
+                               "if the bed there is not as low as measured, the nozzle would touch the bed" % (d1, plan.layer_z[0]))
+                    else:
+                        txt = "first-layer height depends on this point by up to %.3f mm" % d1
+                    affected.append(dict(point=[ol["x"], ol["y"]], point_z=ol["z"], deviation=ol["deviation"],
+                                         copy="T%d/slot%d" % (t, s.index), tool=t, slot=s.index,
                                          first_layer_dz_max=round(d1, 4), foundation_top_dz_max=round(dF, 4),
-                                         first_layer_if_probe_error="nozzle %.3f mm lower than true bed: first layer of %.2f mm would be crushed" % (d1, plan.layer_z[0]) if d1 > plan.layer_z[0] * 0.5 else
-                                         "first layer thickness error up to %.3f mm" % d1))
-        plan.affected_by_outliers = affected
-        if affected:
-            diags.warning("PLAN_OUTLIER_AFFECTED", "%d copies are influenced (>0.01 mm) by the preserved mesh outlier(s)" % len(affected),
-                          "Printability of these copies depends on the outlier being a real bed feature. Re-probe to confirm.")
+                                         effect=txt))
+    plan.affected_by_outliers = affected
+    if affected:
+        diags.warning("PLAN_DEVIATING_POINT_AFFECTS_COPIES",
+                      "%d copy/point combinations depend (>0.01 mm) on mesh point(s) that deviate markedly from their neighbours"
+                      % len(affected),
+                      "Measured values are used unchanged. Check the bed at the listed point(s) before printing; "
+                      "regenerate after any new mesh.")
 
     plan.checks = checks
     plan.validated_scope = ("reference layout preset (reference-300, 40 copies) compared against the reviewed oracle; "

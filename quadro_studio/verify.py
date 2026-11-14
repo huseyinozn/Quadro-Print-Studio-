@@ -37,12 +37,18 @@ TOL = dict(
     thickness_nominal=0.004, # mm, measured local thickness in COPY layers vs nominal (plane-fit estimate)
     e_exact_rel=2e-3,        # relative, E per slicer move where no flow compensation applies
     e_exact_abs=2e-6,
-    e_found_rel=0.03,        # relative, foundation E vs A(h_meas,w)/A(h0,w)
+    # relative, foundation E vs A(h_meas,w)/A(h0,w). Derived from the thickness
+    # estimator, not from the oracle: the plane-fit estimate of h is within 2 um
+    # (largest deviation measured where the true thickness is exactly 0.200),
+    # dA/A = 1.07 * dh/h, smallest h 0.129 mm -> 1.07 * 0.002 / 0.129 = 1.7 %.
+    e_found_rel=0.017,
     retract=1e-4,            # mm filament, retraction balance at each extrusion
     transfer_clearance=0.5,  # mm, minimum nozzle tip clearance above other deposits during transfers
     inpart_sink=0.03,        # mm, nozzle may not sink below own completed material during in-part travel
     descend_margin=0.0,      # mm, approach descent may not end below local material (1 mm cell)
-    oracle_xy=0.002, oracle_z=0.001, oracle_e_exact=2e-3, oracle_e_found=0.03, oracle_f=0.05,
+    oracle_xy=0.002, oracle_z=0.001, oracle_e_exact=2e-3, oracle_f=0.05,
+    # foundation-layer E vs oracle: NO tolerance. The oracle's foundation E rule was
+    # not recovered; differences are reported with location and amounts as a finding.
 )
 
 WORD = re.compile(r"([A-Z])([-+]?(?:\d+\.?\d*|\.\d+))")
@@ -1140,23 +1146,34 @@ def compare(cand: Sim, orc: Sim, F):
                 fbad += 1
             if sm[k].kind == "extrude" and oa["e"][k] > 0:
                 r = ca["e"][k] / oa["e"][k] - 1.0
-                b = estat.setdefault((zk, t), [1e9, -1e9, 0, 0])
+                b = estat.setdefault((zk, t), [1e9, -1e9, 0, 0, 0])
                 b[0] = min(b[0], r); b[1] = max(b[1], r); b[2] += 1
-                lim = TOL["oracle_e_found"] if (1 < L <= F) else TOL["oracle_e_exact"]
-                if abs(r) > lim:
+                if 1 < L <= F:
+                    if abs(r) > 0.01:
+                        b[3] += 1
+                    if abs(r) > 0.02:
+                        b[4] += 1
+                elif abs(r) > TOL["oracle_e_exact"]:
                     b[3] += 1
                 key = "e_found" if 1 < L <= F else "e_exact"
                 if abs(r) > abs(worst[key][0]):
-                    worst[key] = (r, dict(nozzle=t, layer=L, d=d, slicer_line=sm[k].line))
+                    worst[key] = (r, dict(head="T%d" % t, layer=L, copy_translation=d, slicer_line=sm[k].line,
+                                          slicer_e_mm=sm[k].e, candidate_e_mm=round(ca["e"][k], 6), oracle_e_mm=round(oa["e"][k], 6),
+                                          candidate_minus_oracle_mm=round(ca["e"][k] - oa["e"][k], 6),
+                                          width=sm[k].width, feature=sm[k].ftype,
+                                          candidate_tip_z=round(ca["z"][k], 5), oracle_tip_z=round(oa["z"][k], 5)))
     out["aligned_moves_compared"] = nmoves
     out["z_delta"] = {"%s/T%d" % k: [round(v[0], 6), round(v[1], 6), v[2]] for k, v in sorted(zstat.items())}
-    out["e_ratio_minus_1"] = {"%s/T%d" % k: [round(v[0], 5), round(v[1], 5), v[2], v[3]] for k, v in sorted(estat.items())}
+    out["e_ratio_minus_1"] = {"%s/T%d" % k: dict(min=round(v[0], 5), max=round(v[1], 5), moves=v[2], over_1pct=v[3], over_2pct=v[4])
+                              for k, v in sorted(estat.items())}
     out["f_mismatches"] = fbad
     out["worst"] = {k: dict(value=round(v[0], 6), where=v[1]) for k, v in worst.items()}
     zmax = max((max(abs(v[0]), abs(v[1])) for v in zstat.values()), default=0)
     out["z_max_abs_delta"] = round(zmax, 6)
     out["z_within_tol"] = zmax <= TOL["oracle_z"]
-    out["e_outside_tol"] = sum(v[3] for v in estat.values())
+    out["e_exact_layers_outside_tol"] = sum(v[3] for k, v in estat.items() if not k[0].startswith("L2"))
+    out["foundation_e_open_finding"] = ("oracle foundation E rule not recovered; candidate uses flow-area scaling; "
+                                        "differences reported, not accepted by tolerance")
     # order of visits per nozzle
     def seq(sim):
         s = {}

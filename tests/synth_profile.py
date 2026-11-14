@@ -100,7 +100,7 @@ gcode:
 """
 
 
-def mesh_block(name="default", fn=None, outlier=None):
+def mesh_block(name="default", fn=None, outlier=None, extra_outliers=()):
     fn = fn or (lambda x, y: 0.0004 * (x - 150) - 0.0003 * (y - 150) + 0.000002 * (x - 150) * (y - 150))
     rows = []
     for j in range(9):
@@ -109,8 +109,9 @@ def mesh_block(name="default", fn=None, outlier=None):
         for i in range(9):
             x = 5 + i * 36.25
             v = fn(x, y)
-            if outlier and (i, j) == outlier[0]:
-                v += outlier[1]
+            for ol in ([outlier] if outlier else []) + list(extra_outliers):
+                if (i, j) == ol[0]:
+                    v += ol[1]
             vals.append("%.6f" % v)
         rows.append("#*# \t  " + ", ".join(vals))
     return "\n".join(["#*# [bed_mesh %s]" % name, "#*# version = 1", "#*# points ="] + rows + [

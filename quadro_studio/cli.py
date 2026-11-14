@@ -212,8 +212,11 @@ def cmd_verify(a):
         out["oracle_result"] = ores
         out["comparison"] = cmp_
         print("oracle (same checks): %s, %d errors (%.1fs)" % ("PASS" if ores["passed"] else "FAIL", ores["error_count"], time.time() - t1))
-        print("comparison: placements max delta %.4f mm, Z max |delta| %.5f mm, E outside tol %d, F mismatches %d, order identical %s"
-              % (cmp_["placement_max_delta_mm"], cmp_["z_max_abs_delta"], cmp_["e_outside_tol"], cmp_["f_mismatches"], cmp_["visit_order_identical"]))
+        w = cmp_["worst"]["e_found"]["where"] or {}
+        print("comparison: placements max delta %.4f mm, Z max |delta| %.5f mm, F mismatches %d, order identical %s"
+              % (cmp_["placement_max_delta_mm"], cmp_["z_max_abs_delta"], cmp_["f_mismatches"], cmp_["visit_order_identical"]))
+        print("foundation E largest difference (open finding): %s layer %s slicer line %s: oracle %s mm, candidate %s mm"
+              % (w.get("head"), w.get("layer"), w.get("slicer_line"), w.get("oracle_e_mm"), w.get("candidate_e_mm")))
     out["elapsed_s"] = round(time.time() - t0, 2)
     _write_json(a.out, out)
     return 0 if res["passed"] else 3
