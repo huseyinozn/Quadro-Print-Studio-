@@ -161,6 +161,71 @@ class WebFlow(WebBase):
         self.assertIn("no saved bed mesh", r["problems"][0]["text"])
 
 
+class WebExamplesAndMeshMarks(WebBase):
+    def plan_example(self, ex, profile=None):
+        body, ct = multipart({"profile": ("p.zip", profile or self.profile), "example": (None, ex), "count": (None, "40")})
+        st, data, _ = self.req("/api/plan", body, ct)
+        return st, json.loads(data)
+
+    def test_examples_listed(self):
+        st, data, _ = self.req("/api/examples")
+        ex = {e["id"]: e for e in json.loads(data)}
+        self.assertTrue(ex["sharks-40"]["available"])
+        self.assertEqual(ex["sharks-40"]["mode"], "Farm Mode")
+        self.assertFalse(ex["orcacube"]["available"])
+        self.assertFalse(ex["fidgets-2c"]["available"])
+        self.assertNotIn("file", ex["sharks-40"])                # example source is never offered for download
+        for e in ex.values():
+            st, img, hdr = self.req(e["image"])
+            self.assertEqual(st, 200)
+            self.assertTrue(img.startswith(b"\x89PNG"))
+        st, _, _ = self.req("/examples/../server.py")
+        self.assertEqual(st, 404)
+
+    def test_example_needs_only_profile(self):
+        st, r = self.plan_example("sharks-40")
+        self.assertEqual(st, 200)
+        self.assertEqual(r["state"], "planned", r.get("problems"))
+        self.assertEqual(r["layout"]["count"], 40)
+        self.assertEqual(r["model"]["layers"], 83)
+
+    def test_coming_soon_example_refused(self):
+        st, r = self.plan_example("orcacube")
+        self.assertEqual(st, 409)
+        st, r = self.plan_example("fidgets-2c")
+        self.assertEqual(st, 409)
+
+    def test_marks_equal_planner_list(self):
+        from quadro_studio.slicer import load_slice
+        from quadro_studio.profile import load_profile
+        from quadro_studio.plan import make_plan, LayoutOptions
+        from quadro_studio.web.server import EXAMPLE_DIR
+        meshes = [synth_profile.mesh_block(outlier=((7, 8), -0.52))]
+        prof_path = synth_profile.build(os.path.join(self.tmp, "dev.zip"), meshes=meshes)
+        st, r = self.plan_example("sharks-40", open(prof_path, "rb").read())
+        self.assertEqual(r["state"], "planned", r.get("problems"))
+        model, _ = load_slice(os.path.join(EXAMPLE_DIR, "sharks_single.gcode"))
+        prof, _ = load_profile(prof_path)
+        plan, _ = make_plan(model, prof, LayoutOptions(count=40, preset="auto"))
+        expected = sorted({"%d/%d" % (a["tool"], a["slot"]) for a in plan.affected_by_outliers})
+        self.assertTrue(expected)
+        self.assertEqual(r["layout"]["mesh_affected"], expected)
+        marked = sorted("%d/%d" % (c["head"], c["slot"]) for c in r["layout"]["copies"] if "mesh_effects" in c)
+        self.assertEqual(marked, expected)
+        for c in r["layout"]["copies"]:
+            for e in c.get("mesh_effects", []):
+                self.assertIn("first_layer_mm", e)
+                self.assertIn("layer_end_top_mm", e)
+        self.assertEqual(len(r["layout"]["deviating_points"]), 1)
+
+    def test_clean_mesh_has_no_marks(self):
+        st, r = self.plan_example("sharks-40")
+        self.assertEqual(r["layout"]["mesh_affected"], [])
+        self.assertEqual(r["layout"]["deviating_points"], [])
+        self.assertFalse(any("mesh_effects" in c for c in r["layout"]["copies"]))
+        self.assertFalse(any(w["code"].startswith("MESH_DEVIATING") for w in r["warnings"]))
+
+
 class WebVerificationFailure(WebBase):
     hook = staticmethod(drop_accel)
 

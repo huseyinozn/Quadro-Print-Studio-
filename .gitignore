@@ -5,3 +5,5 @@ fixtures/
 *.gcode
 *.zip
 review_out/
+# public example slicer inputs shipped with the web app (no printer calibration inside)
+!quadro_studio/web/examples/*.gcode

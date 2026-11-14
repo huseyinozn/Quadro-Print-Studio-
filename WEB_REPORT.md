@@ -15,3 +15,17 @@ Browser: Chromium via Playwright, iPhone 13 viewport. Inputs: the private shark 
 Automated tests: `QUADRO_FIXTURES=<fixtures> python3 -m unittest discover -s tests` → 78 tests OK (8 web tests incl. success download hash, 403 before verification, 403 after failed verification, new job on changed inputs, model-size-driven spacing, verified alternative count).
 
 Notes: the 40-copy layout in the web app is computed from the model size (auto): 2 columns per head, head spacing 66.0 mm, smallest gap 3.24 mm. It differs from the earlier reference grid (72/35/58 mm), which remains available in the CLI as `--preset reference-300`. Software checks passed is a statement about the generated file, not about a print on hardware.
+
+## Update: example prints and mesh marks (review 03)
+
+| Check | Result |
+|---|---|
+| Mesh marks come 1:1 from the planner's affected-copy list | planner: 0/8, 0/9, 1/8, 1/9, 2/8, 2/9, 3/8, 3/9; screen: 0/8, 0/9, 1/8, 1/9, 2/8, 2/9, 3/8, 3/9; equal: True |
+| Tap on a copy shows the two calculated effects separately | e.g. Copy 1.9: first layer up to 0.000 mm, common height at the end of layer 5 up to 0.096 mm; no error wording: True |
+| Clean mesh (test-only copy of the profile with that point set to its neighbour median, never used for a print) | planner list empty, marks on screen: 0, equal: True |
+| Phone flow: choose "40 Sharks" → upload only the current profile → 40-copy layout → generate and verify → download | PASS — count prefilled 40, model input shown: False, file choosers for a model: 0, heading "Software checks passed", downloaded SHA-256 equals the verified hash: True |
+| G-code unchanged by this update | downloaded SHA-256 42e44d7f20a4fe8dad44a6af18b93b66451fd52d22be2665ca9ea228c0b1b717, identical to the previous web run |
+| OrcaCube (Copy Mode), Two-Color Fidgets (Dual Color Copy Mode) | shown with their real sliced example images; "Coming soon", not selectable; the API refuses them (HTTP 409) |
+| Automated tests | 83 tests OK (13 web tests incl. example-only plan, coming-soon refusal, marks == planner list, clean mesh → no marks) |
+
+The internal reference file from the example archive was not added to the project, the site or the repository.

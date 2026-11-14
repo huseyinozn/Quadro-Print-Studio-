@@ -39,6 +39,13 @@
     </div>
   </section>
 
+  <section aria-labelledby="examples-h" class="examples-sec">
+    <h2 id="examples-h">Choose an example print</h2>
+    <p class="help0">Sliced example models. Pick one, add your printer's current profile, and see the layout for your own machine.</p>
+    <div class="examples" id="examples"></div>
+    <button type="button" class="secondary own" id="own-model">Upload your own model</button>
+  </section>
+
   <section class="card" id="farm" aria-labelledby="farm-h">
     <h2 id="farm-h">Farm Mode</h2>
     <ol class="steps">
@@ -48,9 +55,20 @@
         <input type="file" id="profile" accept=".zip,application/zip">
       </li>
       <li>
-        <label for="model" class="step-l"><span class="n">2</span>Sliced model</label>
-        <p class="help">G-code of one single-colour model from Co Print Slicer, sliced once for T0.</p>
-        <input type="file" id="model" accept=".gcode,.gco,.txt">
+        <span class="step-l"><span class="n">2</span>Model</span>
+        <div class="source" role="radiogroup" aria-label="Model source">
+          <label><input type="radio" name="source" value="example" id="src-example"> Example: 40 Sharks</label>
+          <label><input type="radio" name="source" value="upload" id="src-upload" checked> Upload your own model</label>
+        </div>
+        <div id="example-chosen" class="chosen hidden">
+          <img src="/examples/sharks.png" alt="" width="56" height="56">
+          <div><b>40 Sharks</b><br><span class="help-in">The sliced model is included. Nothing to upload here.</span></div>
+        </div>
+        <div id="upload-box">
+          <p class="help">G-code of one single-colour model from Co Print Slicer, sliced once for T0.</p>
+          <label for="model" class="sr">Sliced model G-code</label>
+          <input type="file" id="model" accept=".gcode,.gco,.txt">
+        </div>
       </li>
       <li>
         <label for="count" class="step-l"><span class="n">3</span>Copies</label>
@@ -72,6 +90,7 @@
     <p class="phase-note" id="phase-note"></p>
     <div class="bed-wrap"><svg id="bed" role="img" aria-label="Bed layout preview"></svg></div>
     <div class="legend" id="legend"></div>
+    <div class="copy-info" id="copy-info" aria-live="polite">Tap a copy to see its details.</div>
     <ul class="warn" id="warnings"></ul>
     <details class="checks"><summary>Layout checks</summary><ul id="checklist"></ul></details>
     <button type="button" class="primary" id="generate">Generate and verify</button>

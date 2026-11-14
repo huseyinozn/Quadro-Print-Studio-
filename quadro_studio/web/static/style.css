@@ -85,3 +85,27 @@ a.download { display: block; text-align: center; text-decoration: none; backgrou
 .prog i { display: block; height: 100%; width: 35%; background: var(--accent); animation: slide 1.4s infinite ease-in-out; }
 @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
 @media (prefers-reduced-motion: reduce) { .prog i { animation: none; width: 100%; opacity: .5; } }
+
+.examples-sec { margin: 4px 0 20px; }
+.help0 { color: var(--muted); margin: -4px 0 10px; font-size: .94rem; }
+.examples { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+@media (max-width: 720px) { .examples { grid-template-columns: 1fr; } }
+.ex { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
+.ex img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #fff; display: block; }
+.ex .b { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.ex .t { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ex p { margin: 0; color: var(--muted); font-size: .9rem; flex: 1; }
+.ex.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.ex button { margin-top: 6px; width: 100%; }
+.own { width: 100%; margin-top: 12px; }
+.source { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0 8px 30px; }
+.source label { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; }
+.chosen { display: flex; gap: 12px; align-items: center; margin: 4px 0 0 30px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; }
+.chosen img { border-radius: 6px; background: #fff; }
+.help-in { color: var(--muted); font-size: .88rem; }
+.copy-info { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: .9rem; color: var(--muted); margin: 6px 0 10px; }
+.copy-info b { color: var(--ink); }
+.copy-info .eff { display: grid; grid-template-columns: 1fr; gap: 0; margin: 8px 0; }
+.copy-info .eff span { margin-top: 6px; }
+.copy-info .eff b { font-size: 1rem; }
+#bed polygon { cursor: pointer; }

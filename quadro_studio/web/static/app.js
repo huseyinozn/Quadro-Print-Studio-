@@ -12,6 +12,8 @@
   let job = null;          // {id, layout}
   let pollTimer = null;
   let phase = "all";
+  let source = "upload";   // "upload" | "example"
+  const EXAMPLE_ID = "sharks-40";
 
   const els = {
     profile: $("profile"), model: $("model"), count: $("count"), check: $("check"),
@@ -30,8 +32,53 @@
     els.planStatus.textContent = "";
     els.genStatus.textContent = "";
     els.gen.disabled = false;
-    const ready = els.profile.files.length === 1 && els.model.files.length === 1 && countValue() >= 4;
+    const haveModel = source === "example" || els.model.files.length === 1;
+    const ready = els.profile.files.length === 1 && haveModel && countValue() >= 4;
     els.check.disabled = !ready;
+    $("copy-info").textContent = "Tap a copy to see its details.";
+  }
+
+  function setSource(src, count) {
+    source = src;
+    $("src-example").checked = src === "example";
+    $("src-upload").checked = src === "upload";
+    $("example-chosen").classList.toggle("hidden", src !== "example");
+    $("upload-box").classList.toggle("hidden", src === "example");
+    for (const c of document.querySelectorAll(".ex")) c.classList.toggle("sel", src === "example" && c.dataset.id === EXAMPLE_ID);
+    if (count) els.count.value = count;
+    resetResults();
+  }
+
+  $("src-example").addEventListener("change", () => setSource("example", 40));
+  $("src-upload").addEventListener("change", () => setSource("upload"));
+  $("own-model").addEventListener("click", () => { setSource("upload"); $("farm").scrollIntoView({ behavior: "smooth" }); });
+
+  async function loadExamples() {
+    let list = [];
+    try { list = await (await fetch("/api/examples")).json(); } catch (e) { return; }
+    const box = $("examples");
+    box.innerHTML = "";
+    for (const e of list) {
+      const card = document.createElement("article");
+      card.className = "ex";
+      card.dataset.id = e.id;
+      card.innerHTML = `<img src="${e.image}" alt="${escapeHtml(e.title)} example" loading="lazy">
+        <div class="b"><div class="t"><h3>${escapeHtml(e.title)}</h3><span class="tag ${e.available ? "ok" : "soon"}">${e.available ? "Available" : "Coming soon"}</span></div>
+        <span class="help-in">${escapeHtml(e.mode)}</span><p>${escapeHtml(e.text)}</p></div>`;
+      const b = document.createElement("button");
+      b.type = "button";
+      if (e.available) {
+        b.className = "primary";
+        b.textContent = "Use this example";
+        b.addEventListener("click", () => { setSource("example", e.count); $("farm").scrollIntoView({ behavior: "smooth" }); });
+      } else {
+        b.className = "secondary";
+        b.textContent = "Coming soon";
+        b.disabled = true;
+      }
+      card.querySelector(".b").appendChild(b);
+      box.appendChild(card);
+    }
   }
 
   els.profile.addEventListener("change", resetResults);
@@ -60,7 +107,8 @@
     els.planStatus.innerHTML = 'Checking the files and calculating the layout…<div class="prog"><i></i></div>';
     const fd = new FormData();
     fd.append("profile", els.profile.files[0]);
-    fd.append("model", els.model.files[0]);
+    if (source === "example") fd.append("example", EXAMPLE_ID);
+    else fd.append("model", els.model.files[0]);
     fd.append("count", String(n));
     let res;
     try {
@@ -129,7 +177,7 @@
     draw(L);
     const lg = $("legend");
     lg.innerHTML = HEADS.map((h, t) => `<span><i style="background:${HC[t]}"></i>${h}: ${L.slots_per_head} copies</span>`).join("") +
-      `<span><i style="background:transparent;border:2px dashed var(--bad)"></i>depends on a marked mesh point</span>`;
+      (L.mesh_affected.length ? `<span><i style="background:transparent;border:2px dashed var(--bad)"></i>${L.mesh_affected.length} copies depend on a marked mesh point</span>` : "");
     const w = $("warnings");
     w.innerHTML = "";
     for (const x of res.warnings || []) {
@@ -179,8 +227,11 @@
       const on = activeHead === null || activeHead === c.head;
       const pts = c.hull.map(([x, y]) => `${x},${Y(y)}`).join(" ");
       el("polygon", { points: pts, fill: HC[c.head], "fill-opacity": on ? 0.35 : 0.06, stroke: HC[c.head], "stroke-width": 0.7, "stroke-opacity": on ? 1 : 0.25 }, svg);
-      if (c.mesh_dependency !== undefined && c.mesh_dependency > 0.05) {
-        el("polygon", { points: pts, fill: "none", stroke: "var(--bad)", "stroke-width": 1.2, "stroke-dasharray": "3 2" }, svg);
+      const poly = svg.lastChild;
+      poly.dataset.copy = `${c.head}/${c.slot}`;
+      poly.addEventListener("click", () => showCopy(c, L));
+      if (c.mesh_effects) {
+        const mk = el("polygon", { points: pts, fill: "none", stroke: "var(--bad)", "stroke-width": 1.2, "stroke-dasharray": "3 2", "data-mesh-mark": `${c.head}/${c.slot}`, "pointer-events": "none" }, svg);
       }
       const cx = c.hull.reduce((a, p) => a + p[0], 0) / c.hull.length;
       const cy = c.hull.reduce((a, p) => a + p[1], 0) / c.hull.length;
@@ -196,6 +247,23 @@
       const t = el("title", {}, svg);
       t.textContent = `Measured mesh point (${d.x}, ${d.y}) = ${d.z} mm, ${d.deviation} mm from its neighbours (used as measured)`;
     }
+  }
+
+  function showCopy(c, L) {
+    const box = $("copy-info");
+    const F = L.foundation_layers;
+    let html = `<b>Copy ${c.head + 1}.${c.slot + 1}</b> · ${HEADS[c.head]} · printed in group ${c.slot + 1} from layer ${F + 1}`;
+    if (c.mesh_effects) {
+      for (const e of c.mesh_effects) {
+        html += `<div class="eff"><span>Marked mesh point</span><b>(${e.point[0]}, ${e.point[1]}) = ${e.point_z} mm</b>
+          <span>Calculated effect on the first layer</span><b>up to ${e.first_layer_mm.toFixed(3)} mm</b>
+          <span>Calculated effect on the common height at the end of layer ${F}</span><b>up to ${e.layer_end_top_mm.toFixed(3)} mm</b></div>`;
+      }
+      html += `<div>These are calculated from the measured mesh, which is used exactly as measured. Check the bed at the marked point before printing.</div>`;
+    } else {
+      html += `<div>This copy does not depend on a marked mesh point.</div>`;
+    }
+    box.innerHTML = html;
   }
 
   // ---------------------------------------------------------------- generate + verify
@@ -275,5 +343,6 @@
 
   function fmt(x, d = 2) { return (x === null || x === undefined || isNaN(x)) ? "–" : Number(x).toFixed(d); }
 
+  loadExamples();
   resetResults();
 })();

@@ -43,6 +43,20 @@ from ..generate import generate
 from . import messages
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+EXAMPLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")
+# Public example slicer inputs (no printer calibration inside). Only modes with a
+# finished converter + verifier are selectable; the others are shown as examples.
+EXAMPLES = [
+    dict(id="sharks-40", title="40 Sharks", mode="Farm Mode", available=True, count=40,
+         file="sharks_single.gcode", image="/examples/sharks.png",
+         text="One shark sliced once; 40 identical copies, 10 per head. You only upload your printer profile."),
+    dict(id="orcacube", title="OrcaCube", mode="Copy Mode", available=False, count=None,
+         file="orca_cube.gcode", image="/examples/orcacube.png",
+         text="The same cube printed by several heads at the same time."),
+    dict(id="fidgets-2c", title="Two-Color Fidgets", mode="Dual Color Copy Mode", available=False, count=None,
+         file="two_color_fidget.gcode", image="/examples/fidgets.png",
+         text="Two two-colour fidgets at once: T0 and T1 print one colour on both models together, T2 and T3 the other colour."),
+]
 MAX_SLICE = 256 * 1024 * 1024
 MAX_PROFILE = 24 * 1024 * 1024
 MAX_BODY = MAX_SLICE + MAX_PROFILE + 1024 * 1024
@@ -250,13 +264,17 @@ def layout_json(model, prof, plan):
     for key, hull in plan.footprints.items():
         t, s = (int(v) for v in key.split("/"))
         copies.append(dict(head=t, slot=s, hull=hull))
-    affected = {}
+    # Copies listed by the planner as depending (> 0.01 mm) on a measured mesh point
+    # that deviates from its neighbours. Taken 1:1 from plan.affected_by_outliers.
+    effects = {}
     for a in plan.affected_by_outliers:
-        affected.setdefault("%d/%d" % (a["tool"], a["slot"]), []).append(a)
+        effects.setdefault("%d/%d" % (a["tool"], a["slot"]), []).append(dict(
+            point=[a["point"][0], a["point"][1]], point_z=a["point_z"],
+            first_layer_mm=a["first_layer_dz_max"], layer_end_top_mm=a["foundation_top_dz_max"]))
     for c in copies:
         k = "%d/%d" % (c["head"], c["slot"])
-        if k in affected:
-            c["mesh_dependency"] = max(x["first_layer_dz_max"] for x in affected[k])
+        if k in effects:
+            c["mesh_effects"] = effects[k]
     groups = []
     for s in plan.slots:
         groups.append([[round(s.cx + plan.sync_pitch * t, 3), round(s.cy - plan.offsets[t][1], 3)] for t in range(4)])
@@ -272,6 +290,7 @@ def layout_json(model, prof, plan):
         deviating_points=[dict(x=p["x"], y=p["y"], z=p["z"], deviation=p["deviation"], neighbour_median=p["neighbour_median"])
                           for p in plan.mesh_deviating_points],
         offsets={"T%d" % t: list(plan.offsets[t]) for t in range(4)},
+        mesh_affected=sorted(effects),
         checks=[dict(name=c["name"], ok=c["ok"], detail=c["detail"]) for c in plan.checks],
     )
 
@@ -317,6 +336,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.static("index.html", "text/html; charset=utf-8")
         if path in ("/app.js", "/style.css"):
             return self.static(path[1:], "application/javascript" if path.endswith(".js") else "text/css")
+        if path == "/api/examples":
+            return self.send_json([{k: v for k, v in e.items() if k != "file"} for e in EXAMPLES])
+        if path.startswith("/examples/") and path.endswith(".png"):
+            name = os.path.basename(path)
+            if name in {os.path.basename(e["image"]) for e in EXAMPLES}:
+                return self.static(os.path.join("examples", name), "image/png")
         if path == "/api/health":
             return self.send_json(dict(ok=True, engine=ENGINE))
         if path.startswith("/api/job/"):
@@ -358,8 +383,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/plan":
                 f = parse_multipart(self, MAX_BODY)
+                ex_id = (f.get("example", (None, b""))[1] or b"").decode().strip()
+                if ex_id:
+                    ex = next((e for e in EXAMPLES if e["id"] == ex_id), None)
+                    if ex is None:
+                        return self.send_json(dict(error="Unknown example."), 400)
+                    if not ex["available"]:
+                        return self.send_json(dict(error="%s is coming soon." % ex["mode"]), 409)
+                    with open(os.path.join(EXAMPLE_DIR, ex["file"]), "rb") as fh:
+                        f["model"] = ("%s.gcode" % ex["id"], fh.read())
                 if "model" not in f or "profile" not in f:
-                    return self.send_json(dict(error="Upload both the sliced G-code and the printer profile ZIP."), 400)
+                    return self.send_json(dict(error="Upload your printer profile ZIP and choose an example or upload a sliced model."), 400)
                 mname, mbytes = f["model"]
                 _, pbytes = f["profile"]
                 if len(mbytes) > MAX_SLICE or len(pbytes) > MAX_PROFILE:
