@@ -42,7 +42,9 @@ RIGHT = {1, 3}
 
 @dataclass
 class DualOptions:
-    foundation_layers: int = 3
+    foundation_layers: int = 3          # default number of independent layers (start of the search)
+    foundation_auto: bool = True        # use more only if 3 cannot even out bed + head heights
+    foundation_max: int = 10            # never more than this (and never more than a quarter of the model)
     head_margin: float = 5.0
     min_gap: float = 5.0
     tower_size: float = 10.0
@@ -348,6 +350,39 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
     check("pair_parks", home[2] - hiA >= c and loB - home[1] >= c,
           "pair A keeps %.1f mm to parked T2, pair B keeps %.1f mm to parked T1" % (home[2] - hiA, loB - home[1]))
 
+    # ---- independent layers: default 3, more only if 3 cannot even out bed + head heights -------------
+    def found_range(Fc):
+        plan.foundation_layers = Fc
+        g = [1e9, -1e9]
+        for t in range(4):
+            mod = dual.models[PAIR[PAIR_OF[t]][0]]
+            for L in range(2, Fc + 1):
+                for mv in mod.blocks[L - 1].moves():
+                    if mv.kind != "extrude":
+                        continue
+                    hh = plan.thickness(L, t, mv.x + slot.dx, mv.y + slot.dy)
+                    g = [min(g[0], hh), max(g[1], hh)]
+        return g
+    Fmax = max(F, min(o["foundation_max"], dual.layer_count // 4)) if o["foundation_auto"] else F
+    tried = []
+    chosen = None
+    for Fc in range(F, Fmax + 1):
+        g = found_range(Fc)
+        ok = Fc == 1 or (hmin - 1e-9 <= g[0] and g[1] <= hmax + 1e-9)
+        tried.append(dict(layers=Fc, thickness=[round(g[0], 4), round(g[1], 4)] if Fc > 1 else None, ok=ok))
+        if ok:
+            chosen = Fc
+            break
+    F = chosen if chosen is not None else F
+    plan.foundation_layers = F
+    plan.foundation_choice = dict(default=o["foundation_layers"], chosen=F, auto=o["foundation_auto"], tried=tried,
+                                  pairs_from_layer=F + 1, max_allowed=Fmax, found=chosen is not None)
+    check("foundation_layers", chosen is not None,
+          ("%d independent layers (default %d) even out every head's own bed and offset height; pairs print together from "
+           "layer %d." % (F, o["foundation_layers"], F + 1)) if chosen is not None else
+          ("even %d independent layers cannot even out the bed and head heights (layer thickness %.3f-%.3f mm, allowed %.2f-%.2f)."
+           % (Fmax, tried[-1]["thickness"][0], tried[-1]["thickness"][1], hmin, hmax)), value=F)
+
     # ---- Z: deviation limit (owner: 0.30 mm) and the SEPARATE into-material / travel checks -------
     from .dualz import analyse_z
     from .dualtol import within
@@ -421,7 +456,7 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
     plan.room = None
     if plan.z_analysis is not None:
         rm = analyse_room(plan, plan.z_analysis, room_min, t_layer=(o["h_min_ratio"] * nozzle, o["h_max_ratio"] * nozzle),
-                          flow_tol=o["sync_flow_tolerance"], edge_goal=False)
+                          flow_tol=o["sync_flow_tolerance"], edge_goal=False, dual=dual)
         plan.room = rm
         b, a_ = rm["before"], rm["after"]
         if rm["feasible"] and not rm["layers_changed"]:
@@ -441,11 +476,15 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
                            % (rm["max_raise"], len(rm["goals_unmet"]), rm["goals_unmet"][0]["layer"]) if rm["goals_unmet"] else
                            "the room under the bead stays below the minimum")
             if not rm["conditions"]["synchronised_flow"]:
-                why.append("one synchronised E cannot fit both models: at the same model point the room differs by %.4f mm between "
-                           "left and right (T3-T1 vs T2-T0 Z offsets), e.g. layer %d %s: left %.3f mm, right %.3f mm needs %.2fx "
-                           "different filament (%d layer/pair cases)" % (
-                               rm["model_room_difference"], ex["layer"], ex["pair"], ex["room_left"], ex["room_right"],
-                               (ex["flow_mismatch"] + 1) if ex["flow_mismatch"] is not None else float("inf"), len(fails)) if ex else "")
+                fc = rm["sync_with_compensation"]["first_conflict"]
+                st = rm["sync_with_compensation"]["stats"]
+                why.append("one synchronised E cannot fit both models on the same move: first at layer %d, %s, slicer line %d (%s): "
+                           "left (%.2f, %.2f) room %.3f mm on %s needs %.0f %% of the slice E, right (%.2f, %.2f) room %.3f mm on %s "
+                           "needs %.0f %% (accepted +/-%.1f %% each, no common E); %d moves in %d layer/pair turns" % (
+                               fc["layer"], fc["pair"], fc["slicer_line"], fc["feature"], fc["left_xy"][0], fc["left_xy"][1],
+                               fc["room_left"], fc["below_left"], fc["e_left_pct"], fc["right_xy"][0], fc["right_xy"][1],
+                               fc["room_right"], fc["below_right"], fc["e_right_pct"], o["sync_flow_tolerance"] * 100,
+                               st["conflict_moves"], len(st["conflict_layers"])) if fc else "")
             if not rm["conditions"]["edge_room"]:
                 why.append("at continuing colour borders (layers %d-%d) the right model's colour-1 edge cannot get room >= 0 while "
                            "colour 2 on the left stays within %.2f mm of colour 1: the best average is %.4f mm" % (
@@ -459,15 +498,7 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
               limit=room_min)
 
     # ---- foundation thickness over every head's region and tower -----------------------------------
-    glob = [1e9, -1e9]
-    for t in range(4):
-        mod = dual.models[PAIR[PAIR_OF[t]][0]]
-        for L in range(2, F + 1):
-            for mv in mod.blocks[L - 1].moves():
-                if mv.kind != "extrude":
-                    continue
-                hh = plan.thickness(L, t, mv.x + slot.dx, mv.y + slot.dy)
-                glob = [min(glob[0], hh), max(glob[1], hh)]
+    glob = found_range(F)
     plan.foundation_stats = dict(global_range=[round(v, 4) for v in glob], limits=[hmin, hmax])
     if F > 1:
         check("foundation_thickness", hmin <= glob[0] and glob[1] <= hmax,

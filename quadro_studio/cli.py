@@ -254,7 +254,16 @@ def cmd_verify_dual(a):
     if not diags.ok():
         print(diags.render())
         return 2
-    res, _sim = verify_dual(prof, dual.models, a.gcode, a.foundation_layers or 3)
+    F = a.foundation_layers
+    if F is None:                      # read it from the file header (the generator writes it)
+        import re as _re
+        with open(a.gcode) as fh:
+            for _ in range(20):
+                m = _re.search(r"foundation_layers=(\d+)", fh.readline())
+                if m:
+                    F = int(m.group(1))
+                    break
+    res, _sim = verify_dual(prof, dual.models, a.gcode, F or 3)
     out = dict(stage="verify", mode="dual", candidate=os.path.basename(a.gcode), candidate_sha256=_sha(a.gcode),
                slice_sha256=_sha(a.slice), profile_fingerprint=prof.fingerprint, tolerances=TOL,
                candidate_result=res, profile_diagnostics=diags.as_list())

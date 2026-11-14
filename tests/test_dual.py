@@ -227,10 +227,32 @@ class DualMode(unittest.TestCase):
         r = plan.room
         self.assertAlmostEqual(r["model_room_difference"], 0.23, delta=1e-4)   # (T3-T1) - (T2-T0) Z offsets
         self.assertFalse(r["conditions"]["synchronised_flow"])
+        both_other = 0
         for x in r["sync_flow_failures"]:
-            self.assertAlmostEqual(abs(x["room_left"] - x["room_right"]), 0.23, delta=2e-3)
             self.assertIn(x["pair"], ("T0+T1", "T2+T3"))
+            mine = "colour 1" if x["pair"] == "T0+T1" else "colour 2"
+            if x["below_left"] != mine and x["below_right"] != mine:     # both on the other colour: offset mismatch
+                both_other += 1
+                self.assertAlmostEqual(abs(x["room_left"] - x["room_right"]), 0.23, delta=2e-3)
+        self.assertGreater(both_other, 0)
         self.assertLess(r["before"]["right"]["centre_min"], 0.08)
+
+    def test_sync_flow_checked_point_by_point(self):
+        plan, d = make_dual_plan(self.dual, self.bad_prof)
+        r = plan.room
+        fc = r["sync_with_compensation"]["first_conflict"]
+        self.assertIsNotNone(fc)
+        for k in ("layer", "pair", "slicer_line", "left_xy", "right_xy", "room_left", "room_right", "e_left_pct", "e_right_pct"):
+            self.assertIn(k, fc)
+        self.assertGreater(fc["layer"], plan.foundation_layers)            # only synchronised turns are judged
+        st = r["sync_as_planned"]["stats"]
+        self.assertGreater(st["both_on_material"], st["conflict_points"])   # most points have a common E
+
+    def test_consistent_offsets_have_common_e_everywhere(self):
+        from quadro_studio.dualroom import sync_flow_points
+        r = sync_flow_points(self.dual, self.plan, 0.08)
+        self.assertTrue(r["feasible"], r["first_conflict"])
+        self.assertEqual(r["stats"]["conflict_points"], 0)
 
     def test_consistent_offsets_room_ok(self):
         ck = {c["name"]: c for c in self.plan.checks}
@@ -400,6 +422,42 @@ class DualThresholds(unittest.TestCase):
             self.assertGreater(res["raised_travel_z_moves"], 0)
         self.assertEqual(res["dual_travel_drag"]["moves"], 0, res["dual_travel_drag"])
         self.assertEqual(res["visits_failed"], 0, res["visits_failed_examples"])
+
+
+class DualFoundationLayers(unittest.TestCase):
+    """Independent layers: 3 by default, more only when 3 cannot even out bed + head heights."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.slice = synth_dual.write(os.path.join(cls.tmp, "d.gcode"), layers=24)
+        cls.dual, _ = load_dual(cls.slice)
+
+    def test_default_three_when_enough(self):
+        p = load_profile(synth_profile.build(os.path.join(self.tmp, "ok.zip"), offsets=CONSISTENT))[0]
+        plan, d = make_dual_plan(self.dual, p)
+        self.assertEqual(plan.foundation_layers, 3)
+        self.assertEqual(plan.foundation_choice["pairs_from_layer"], 4)
+
+    def test_steep_bed_uses_the_smallest_sufficient_count(self):
+        steep = [synth_profile.mesh_block(fn=lambda x, y: 0.006 * (x - 150))]
+        p = load_profile(synth_profile.build(os.path.join(self.tmp, "steep.zip"), meshes=steep, offsets=CONSISTENT))[0]
+        plan, d = make_dual_plan(self.dual, p)
+        fc = plan.foundation_choice
+        self.assertGreater(fc["chosen"], 3, fc)
+        self.assertFalse(fc["tried"][0]["ok"])
+        self.assertTrue(fc["tried"][-1]["ok"])
+        self.assertEqual(len(fc["tried"]), fc["chosen"] - 2)                 # 3, 4, ... stops at the first that works
+        self.assertLessEqual(fc["chosen"], fc["max_allowed"])
+        self.assertTrue(d.ok(), d.render())
+        text, _ = generate_dual(self.dual, p, plan)
+        self.assertIn("foundation_layers=%d" % fc["chosen"], text[:600])
+        out = os.path.join(self.tmp, "steep.gcode")
+        with open(out, "w") as f:
+            f.write(text)
+        res, sim = verify_dual(p, self.dual.models, out, fc["chosen"])
+        self.assertTrue(res["passed"], res["issues"][:4])
+        self.assertEqual(res["synchronized_from_layer"], fc["chosen"] + 1)
 
 
 class CopyPreheat(unittest.TestCase):

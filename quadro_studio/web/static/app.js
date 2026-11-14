@@ -456,8 +456,10 @@
       <tr><td>At colour borders (bead edge)</td><td>${f(r.before.left.edge_min)} mm</td><td>${f(r.before.right.edge_min)} mm</td></tr>
       <tr><td>With local layer compensation</td><td>${f(r.after.left.centre_min)} mm</td><td>${f(r.after.right.centre_min)} mm</td></tr></tbody></table>`;
     const ff = (r.sync_flow_failures || []).slice(0, 6);
-    if (ff.length) h += `<table class="zf"><thead><tr><th>Layer</th><th>Pair</th><th>Room left / right</th><th>Filament needed left / right</th></tr></thead><tbody>` +
-      ff.map(x => `<tr><td>${x.layer}</td><td>${x.pair}</td><td>${f(x.room_left)} / ${f(x.room_right)} mm</td><td>${Math.round(x.e_left_rel * 100)} % / ${Math.round(x.e_right_rel * 100)} % (one E for both)</td></tr>`).join("") + `</tbody></table>`;
+    if (ff.length) h += `<p class="fine">Same move, same point on both models (one E for the synchronised pair):</p><table class="zf" id="sync-conflicts"><thead><tr><th>Layer · pair · slicer line</th><th>Room left / right</th><th>E needed left / right</th></tr></thead><tbody>` +
+      ff.map(x => `<tr><td>${x.layer} · ${x.pair} · ${x.slicer_line}</td><td>${f(x.room_left)} / ${f(x.room_right)} mm</td><td>${x.e_left_pct} % / ${x.e_right_pct} %</td></tr>`).join("") + `</tbody></table>`;
+    const fc = L.foundation_choice;
+    if (fc) h += `<p class="fine" id="found-choice">Independent layers: <b>${fc.chosen}</b> (default ${fc.default}); pairs print together from layer ${fc.pairs_from_layer}.</p>`;
     return h;
   }
 
