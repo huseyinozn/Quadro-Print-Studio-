@@ -452,6 +452,7 @@ def dual_layout_json(dual, prof, plan):
         checks=[dict(name=c["name"], ok=c["ok"], detail=c["detail"], **({"value": c["value"]} if "value" in c else {}),
                      **({"limit": c["limit"]} if "limit" in c else {})) for c in plan.checks],
         z_split=getattr(plan, "z_split", None), z_splits=getattr(plan, "z_splits", None),
+        room=({k: v for k, v in plan.room.items() if k not in ("sync_flow",)} if getattr(plan, "room", None) else None),
     )
 
 

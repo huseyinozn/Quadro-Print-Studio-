@@ -138,6 +138,7 @@ def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40
         items = dict(colour_change_interior=[], colour_change_edge=[], sink_extrude=[], sink_travel=[], into_lower_layer=[])
         drag_moves = []
         lift_moves = []
+        room_layers = {}
 
         def upd(d, v):
             d["min"] = v if d["min"] is None else min(d["min"], v)
@@ -170,7 +171,8 @@ def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40
             first = np.ones(len(lin), dtype=bool)
             first[1:] = lin[1:] != lin[:-1]
             cl, ct, cs = lin[first], tp[first], sk[first]
-            return cl // gy, cl % gy, ct, cs, xs, ys
+            lines = np.array([m.line for m in ext])[k]
+            return cl // gy, cl % gy, ct, cs, xs, ys, (ci, cj, tips, lines)
 
         shifts = {t: np.subtract(plan.phys_xy(t, 0.0, 0.0), o_ref) for t in heads}
         for L in range(1, nL + 1):
@@ -186,7 +188,21 @@ def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40
                 oth = other_head(t)
                 fp = fps[t]
                 if fp is not None:
-                    ui, uj, ct, cs, xs, ys = fp
+                    ui, uj, ct, cs, xs, ys, cen = fp
+                    # room under the bead CENTRE where it is printed on the other colour of layer L-1
+                    ci0, cj0, tip0, ln0 = cen
+                    cb, ccol, clay = top[ci0, cj0], topc[ci0, cj0], topl[ci0, cj0]
+                    on_other = (cb > -1e8) & (ccol != col) & (clay == L - 1)
+                    rl = room_layers.setdefault(L, {})
+                    if on_other.any():
+                        room = np.where(on_other, tip0 - cb, 1e9)
+                        q = int(np.argmin(room))
+                        key = "c%d_on_c%d" % (col, 3 - col)
+                        rl[key] = dict(min=round(float(room[q]), 4), max=round(float(np.where(on_other, tip0 - cb, -1e9).max()), 4),
+                                       samples=int(on_other.sum()), head="T%d" % t,
+                                       at=self_item(plan, slot, t, L, xs[q], ys[q])["x":"y"] if False else
+                                       [self_item(plan, slot, t, L, xs[q], ys[q])["x"], self_item(plan, slot, t, L, xs[q], ys[q])["y"]],
+                                       slicer_line=int(ln0[q]))
                     below, bcol, blay = top[ui, uj], topc[ui, uj], topl[ui, uj]
                     has = below > -1e8
                     other = has & (bcol != col)
@@ -232,6 +248,9 @@ def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40
                                                                            below="colour %d (T%d), layer %d" % (3 - col, oth, int(blay[q])),
                                                                            cells=int(lo.sum())))
                         edge = chg & masks[oth][ui, uj]
+                        if edge.any():
+                            ev = th[edge]
+                            room_layers.setdefault(L, {})["edge_c%d" % col] = dict(min=round(float(ev.min()), 4), cells=int(edge.sum()))
                         for name, msk in (("colour_change_edge", edge), ("colour_change_interior", chg & ~edge)):
                             if not msk.any():
                                 continue
@@ -301,7 +320,7 @@ def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40
             if "layers" in d:
                 d["layers"] = _ranges(sorted(d["layers"]))
         report["sides"][side] = dict(heads=["T%d" % h for h in heads], stats=stats, examples=items, drag_moves=drag_moves,
-                                     lift_moves=lift_moves)
+                                     lift_moves=lift_moves, room_layers={str(k): v for k, v in sorted(room_layers.items())})
         if stats["colour_change_interior"]["out_of_limits"] or stats["colour_change_edge"]["out_of_limits"]:
             blocking.add("z_deviation")
         if stats["sink_extrude"]["points"] or stats["into_lower_layer"]["points"]:

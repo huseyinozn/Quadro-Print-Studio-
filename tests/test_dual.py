@@ -121,10 +121,12 @@ class DualMode(unittest.TestCase):
     def test_inconsistent_offsets_pass_limits_with_least_into_material_split(self):
         # synthetic offsets like the real printer: T2-T0 = +0.10, T3-T1 = -0.13 (Z); Y residual 0.21
         plan, d = make_dual_plan(self.dual, self.bad_prof)
-        self.assertTrue(d.ok(), d.render())
         ck = {c["name"]: c for c in plan.checks}
         for name in ("pair_z_consistency", "pair_y_registration", "into_material", "travel_drag"):
             self.assertTrue(ck[name]["ok"], ck[name]["detail"])
+        # ...but the room for the filament where colours stack is not enough on both models
+        self.assertFalse(ck["colour_stack_room"]["ok"])
+        self.assertEqual({x.code for x in d.errors}, {"PLAN_COLOUR_STACK_ROOM"})
         self.assertEqual(plan.z_split, "least_into_material")
         self.assertIn("Fix applied", ck["into_material"]["detail"])
         self.assertLessEqual(plan.z_splits["least_into_material"]["max_into_material"], 0.03)
@@ -208,15 +210,33 @@ class DualMode(unittest.TestCase):
             load_dual(p)
         self.assertIn("DUAL_NOT_COPYABLE", cm.exception.diags.render())
 
-    def test_inconsistent_offsets_output_passes_verification_within_limits(self):
+    def test_inconsistent_offsets_output_fails_only_on_stack_room(self):
         plan, d = make_dual_plan(self.dual, self.bad_prof)
-        text, _ = generate_dual(self.dual, self.bad_prof, plan)
+        text, _ = generate_dual(self.dual, self.bad_prof, plan)        # forced, for the verifier only
         res, sim = self.verify_text(text, self.bad_prof)
-        self.assertTrue(res["passed"], res["issues"][:4])
+        self.assertEqual(set(res["issue_counts"]), {"DUAL_STACK_ROOM"}, res["issue_counts"])
         self.assertAlmostEqual(res["dual_registration_mm"]["left"], 0.21, delta=2e-3)
         self.assertEqual(res["dual_into_material"]["points"], 0)
-        self.assertEqual(res["dual_travel_drag"]["moves"], 0)
         self.assertLessEqual(res["dual_z_deviation"]["max_mm"], 0.30)
+        rm = res["dual_stack_room"]
+        self.assertLess(rm["right"]["centre_min_mm"], 0.08)
+        self.assertGreaterEqual(rm["left"]["centre_min_mm"], 0.08)
+
+    def test_room_analysis_conditions(self):
+        plan, d = make_dual_plan(self.dual, self.bad_prof)
+        r = plan.room
+        self.assertAlmostEqual(r["model_room_difference"], 0.23, delta=1e-4)   # (T3-T1) - (T2-T0) Z offsets
+        self.assertFalse(r["conditions"]["synchronised_flow"])
+        for x in r["sync_flow_failures"]:
+            self.assertAlmostEqual(abs(x["room_left"] - x["room_right"]), 0.23, delta=2e-3)
+            self.assertIn(x["pair"], ("T0+T1", "T2+T3"))
+        self.assertLess(r["before"]["right"]["centre_min"], 0.08)
+
+    def test_consistent_offsets_room_ok(self):
+        ck = {c["name"]: c for c in self.plan.checks}
+        self.assertTrue(ck["colour_stack_room"]["ok"])
+        res, _ = self.verify_text(self.text)
+        self.assertNotIn("DUAL_STACK_ROOM", res["issue_counts"])
 
     def test_models_coloured_differently_refused(self):
         p = synth_dual.write(os.path.join(self.tmp, "patch.gcode"), layers=LAYERS, differ_layer=6, right_patch=True)

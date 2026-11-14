@@ -165,6 +165,21 @@ class DualSim(Sim):
             rr_l.append(np.full(n + 1, rc, dtype=np.int32)); ln_l.append(np.full(n + 1, ln, dtype=np.int64))
         xs, ys, zs, rr, lns = (np.concatenate(v) for v in (xs_l, ys_l, zs_l, rr_l, ln_l))
         ci, cj = self._cells(xs, ys)
+        # room for the filament under the bead CENTRE where it is printed on the other colour of L-1
+        side = SIDE[t]
+        cb, ccol, clay = top[ci, cj], rc_[ci, cj], rl[ci, cj]
+        onc = (cb > -1e8) & (ccol != col) & (clay == L - 1)
+        if onc.any():
+            room = np.where(onc, zs - cb, 1e9)
+            q = int(np.argmin(room))
+            d = st.setdefault("room_" + side, dict(centre_min=1e9, edge_min=1e9, centre_where=None, edge_where=None, short=0))
+            if room[q] < d["centre_min"]:
+                d["centre_min"], d["centre_where"] = float(room[q]), dict(line=int(lns[q]), head="T%d" % t, layer=L)
+            bad = onc & (room < self.h_limits[0] - EPS)
+            if bad.any():
+                d["short"] += int(bad.sum())
+                self.issue("error", "DUAL_STACK_ROOM", "T%d layer %d: only %.3f mm room under the bead printed on the other colour "
+                           "(needed %.2f)" % (t, L, float(room[q]), self.h_limits[0]), int(lns[q]))
         I, J, Z, LN = [], [], [], []
         for rc in np.unique(rr):
             K = self._k(int(rc))
@@ -198,6 +213,15 @@ class DualSim(Sim):
                        % (t, L, float(dep[q]), lim["into_material"]), int(LN[q]))
         chg = oth & (bl == L - 1)
         if chg.any():
+            er = np.where(chg, Z - below, 1e9)
+            q = int(np.argmin(er))
+            d = st.setdefault("room_" + SIDE[t], dict(centre_min=1e9, edge_min=1e9, centre_where=None, edge_where=None, short=0))
+            if er[q] < d["edge_min"]:
+                d["edge_min"], d["edge_where"] = float(er[q]), dict(line=int(LN[q]), head="T%d" % t, layer=L)
+            if er[q] < -EPS:
+                d["short"] += int((er < -EPS).sum())
+                self.issue("error", "DUAL_STACK_ROOM", "T%d layer %d: bead edge %.3f mm below the other colour's top (no room)"
+                           % (t, L, -float(er[q])), int(LN[q]))
             dv = np.abs((Z - below) - hnom)
             d = st["z_dev"]
             d["cells"] += int(chg.sum())
@@ -506,6 +530,11 @@ def analyse_dual(sim: DualSim, registration_limit=None, min_gap=2.0, region_tol=
                                    deepest_seen_mm=round(rs.get("drag_seen", 0.0), 4),
                                    examples=rs["drag"]["examples"])
     res["raised_travel_z_moves"] = len(sim.travel_lifts)
+    res["dual_stack_room"] = {side: dict(centre_min_mm=(round(v["centre_min"], 4) if v["centre_min"] < 1e8 else None),
+                                         edge_min_mm=(round(v["edge_min"], 4) if v["edge_min"] < 1e8 else None),
+                                         centre_where=v["centre_where"], edge_where=v["edge_where"], short_cells=v["short"])
+                              for side, v in ((k[5:], rs[k]) for k in ("room_left", "room_right") if k in rs)}
+    res["dual_stack_room_min_mm"] = sim.h_limits[0]
     errc = sum(c for code, c in sim.issue_counts.items() if any(i["code"] == code and i["severity"] == "error" for i in sim.issues))
     res["issues"] = sim.issues
     res["issue_counts"] = sim.issue_counts

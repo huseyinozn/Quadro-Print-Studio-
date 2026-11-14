@@ -353,7 +353,7 @@
     }
     const mp = $("mapping");
     mp.classList.remove("hidden");
-    const chk = (n) => L.checks.find(c => c.name === n) || { ok: true, detail: "" };
+    const chk = (n) => L.checks.find(c => c.name === n) || { ok: true, detail: "", name: n };
     const KIND = { colour_change_interior: "colour changes from one layer to the next",
                    colour_change_edge: "bead edge on the other colour at a colour border",
                    sink_extrude: "nozzle prints lower than the other colour beside it",
@@ -373,12 +373,14 @@
     }
     const cm = chk("colour_mapping"), cz = chk("pair_z_consistency"), cy = chk("pair_y_registration");
     const ci = chk("into_material"), ct = chk("travel_drag");
-    const dev = (c) => (c.value !== undefined && c.limit !== undefined) ? `<div class="devline">Deviation <b>${Number(c.value).toFixed(3)} mm</b> · limit ${Number(c.limit).toFixed(2)} mm</div>` : "";
+    const dev = (c) => (c.value !== undefined && c.value !== null && c.limit !== undefined) ? (c.name === "colour_stack_room"
+      ? `<div class="devline">Smallest room <b>${Number(c.value).toFixed(3)} mm</b> · needed ${Number(c.limit).toFixed(2)} mm</div>`
+      : `<div class="devline">Deviation <b>${Number(c.value).toFixed(3)} mm</b> · limit ${Number(c.limit).toFixed(2)} mm</div>`) : "";
     const sec = (title, c, extra) => `<div class="${c.ok ? "okb" : "why"}" data-check="${escapeHtml(title)}"><b>${c.ok ? "✓" : "✗"} ${title}</b>${dev(c)}<div>${escapeHtml(c.detail)}</div>${extra || ""}</div>`;
     const why = sec("Colour mapping", cm) + sec("Colour alignment (Y)", cy) + sec("Height (Z)", cz) +
       sec("Nozzle into the other colour", ci, (L.z_blocking || []).includes("nozzle_into_material") ? zHtml : "") +
-      sec("Travels and wipes", ct) +
-      L.checks.filter(c => !c.ok && !["colour_mapping", "pair_z_consistency", "pair_y_registration", "into_material", "travel_drag"].includes(c.name))        .map(c => `<div class="why">✗ ${escapeHtml(c.detail)}</div>`).join("");
+      sec("Travels and wipes", ct) + sec("Room for the filament", chk("colour_stack_room"), roomHtml(L)) +
+      L.checks.filter(c => !c.ok && !["colour_mapping", "pair_z_consistency", "pair_y_registration", "into_material", "travel_drag", "colour_stack_room"].includes(c.name))        .map(c => `<div class="why">✗ ${escapeHtml(c.detail)}</div>`).join("");
     mp.innerHTML = `<table class="map"><thead><tr><th>Head</th><th>Model</th><th>Colour</th><th>Layers 1–${F}</th><th>From layer ${F + 1}</th></tr></thead><tbody>` +
       L.mapping.map(r => `<tr data-head="${r.head}"><td>${HEADS[r.head]}</td><td>${MODEL[r.model]}</td><td><span class="sw" style="background:${L.colours[r.head]}"></span>${r.colour}</td><td>alone</td><td>with ${r.pair.replace("T" + r.head, "").replace(" + ", "").trim()} (pair ${r.pair})</td></tr>`).join("") +
       `</tbody></table>` +
@@ -442,6 +444,21 @@
       const [a, b, c, d] = mk.rect;
       el("rect", { x: Math.min(a, c) - 1, y: Y(Math.max(b, d)) - 1, width: Math.abs(c - a) + 2, height: Math.abs(d - b) + 2, fill: "none", stroke: "var(--bad)", "stroke-width": 0.6, "stroke-dasharray": "1.5 1", "data-diff": mk.head, "pointer-events": "none" }, svg);
     }
+  }
+
+  function roomHtml(L) {
+    const r = L.room;
+    if (!r) return "";
+    const f = (v) => v === null || v === undefined ? "–" : Number(v).toFixed(3);
+    let h = `<table class="zf room"><thead><tr><th></th><th>Left model</th><th>Right model</th></tr></thead><tbody>
+      <tr><td>Smallest room under a bead on the other colour</td><td id="room-left">${f(r.before.left.centre_min)} mm</td><td id="room-right">${f(r.before.right.centre_min)} mm</td></tr>
+      <tr><td>Largest</td><td>${f(r.before.left.centre_max)} mm</td><td>${f(r.before.right.centre_max)} mm</td></tr>
+      <tr><td>At colour borders (bead edge)</td><td>${f(r.before.left.edge_min)} mm</td><td>${f(r.before.right.edge_min)} mm</td></tr>
+      <tr><td>With local layer compensation</td><td>${f(r.after.left.centre_min)} mm</td><td>${f(r.after.right.centre_min)} mm</td></tr></tbody></table>`;
+    const ff = (r.sync_flow_failures || []).slice(0, 6);
+    if (ff.length) h += `<table class="zf"><thead><tr><th>Layer</th><th>Pair</th><th>Room left / right</th><th>Filament needed left / right</th></tr></thead><tbody>` +
+      ff.map(x => `<tr><td>${x.layer}</td><td>${x.pair}</td><td>${f(x.room_left)} / ${f(x.room_right)} mm</td><td>${Math.round(x.e_left_rel * 100)} % / ${Math.round(x.e_right_rel * 100)} % (one E for both)</td></tr>`).join("") + `</tbody></table>`;
+    return h;
   }
 
   function showRegion(t, L) {
@@ -536,6 +553,7 @@
           <span>Colour alignment (Y) left / right model</span><b id="dual-y">${fmt((v.registration_mm || {}).left, 3)} / ${fmt((v.registration_mm || {}).right, 3)} mm (limit ${fmt((v.limits || {}).y_registration, 2)})</b>
           <span>Height (Z) where colours stack, largest deviation</span><b id="dual-z">${fmt(v.z_deviation_mm, 3)} mm (limit ${fmt((v.limits || {}).z_deviation, 2)})</b>
           <span>Nozzle below the other colour, deepest</span><b>${fmt(v.into_material_mm, 3)} mm (limit ${fmt((v.limits || {}).into_material, 2)})</b>
+          <span>Smallest room for the filament, left / right model</span><b id="dual-room">${fmt(((v.stack_room || {}).left || {}).centre_min_mm, 3)} / ${fmt(((v.stack_room || {}).right || {}).centre_min_mm, 3)} mm (min ${fmt(v.stack_room_min, 2)})</b>
           <span>Travel/wipe below the other colour, deepest</span><b>${fmt(v.travel_drag_mm, 3)} mm (limit ${fmt((v.limits || {}).into_material, 2)})</b>
           <span>Pairs print together from layer</span><b>${v.synchronized_from_layer ?? "–"}</b>
           <span>Gap between the two models</span><b>${fmt(v.min_gap_models_mm)} mm</b>

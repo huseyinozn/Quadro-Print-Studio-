@@ -31,6 +31,9 @@ from .diagnostics import Diagnostics
 from .geometry import translate, bbox_gap, poly_distance
 from .mesh import BedMesh
 from .plan import LayoutOptions, Slot, _stacks, purge_band_top
+from .dualtol import DUAL_LIMITS as _DL
+
+DUAL_LIMITS_INTO = _DL["into_material"]
 
 PAIR = {"A": (0, 1), "B": (2, 3)}
 PAIR_OF = {0: "A", 1: "A", 2: "B", 3: "B"}
@@ -50,6 +53,7 @@ class DualOptions:
     z_deviation_limit: float = 0.30     # mm, max |local thickness - nominal| where colours stack (dualtol)
     travel_lift_clearance: float = 0.05 # mm, raised travel ends this far above the other colour's top
     z_split: str = "auto"               # auto | symmetric | least_into_material (pair-B height choice)
+    sync_flow_tolerance: float = 0.017  # relative; one E for a synchronised pair must fit both models (verifier e_found_rel)
     h_min_ratio: float = 0.2
     h_max_ratio: float = 0.75
     standby_temp: float | None = None   # default: print temp + slice standby_temperature_delta
@@ -410,6 +414,49 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
                                                     plan.travel_lift_report["max_lift"], o["travel_lift_clearance"]))
           + (" Deepest travel/wipe below the other colour: %.3f mm (allowed %.2f)." % (max(tmx, 0.0), sk)),
           value=round(max(tmx, 0.0), 5) if not drags else 0.0, limit=sk)
+
+    # ---- room for the filament where one colour is printed on the other (both models) -------------
+    from .dualroom import analyse_room
+    room_min = o["h_min_ratio"] * nozzle
+    plan.room = None
+    if plan.z_analysis is not None:
+        rm = analyse_room(plan, plan.z_analysis, room_min, t_layer=(o["h_min_ratio"] * nozzle, o["h_max_ratio"] * nozzle),
+                          flow_tol=o["sync_flow_tolerance"], edge_goal=False)
+        plan.room = rm
+        b, a_ = rm["before"], rm["after"]
+        if rm["feasible"] and not rm["layers_changed"]:
+            txt = "room under every bead printed on the other colour: left %.3f mm, right %.3f mm (min %.2f)" % (
+                b["left"]["centre_min"], b["right"]["centre_min"], room_min)
+        else:
+            fails = rm["sync_flow_failures"]
+            ex = fails[0] if fails else None
+            txt = ("as planned the smallest room under a bead printed on the other colour is %.3f mm (left) and %.3f mm (right), "
+                   "at colour borders %.3f / %.3f mm (needed: %.2f mm under the bead, >= 0 at its edge). Local layer compensation "
+                   "(pair heights per layer, back on target from layer %d) reaches %.3f / %.3f mm; " % (
+                       b["left"]["centre_min"], b["right"]["centre_min"], b["left"]["edge_min"], b["right"]["edge_min"], room_min,
+                       rm["back_on_target_from"], a_["left"]["centre_min"], a_["right"]["centre_min"]))
+            why = []
+            if not rm["conditions"]["centre_room"]:
+                why.append("raises needed on consecutive layers add up (max %.2f mm) and still miss %d layer(s) from layer %d"
+                           % (rm["max_raise"], len(rm["goals_unmet"]), rm["goals_unmet"][0]["layer"]) if rm["goals_unmet"] else
+                           "the room under the bead stays below the minimum")
+            if not rm["conditions"]["synchronised_flow"]:
+                why.append("one synchronised E cannot fit both models: at the same model point the room differs by %.4f mm between "
+                           "left and right (T3-T1 vs T2-T0 Z offsets), e.g. layer %d %s: left %.3f mm, right %.3f mm needs %.2fx "
+                           "different filament (%d layer/pair cases)" % (
+                               rm["model_room_difference"], ex["layer"], ex["pair"], ex["room_left"], ex["room_right"],
+                               (ex["flow_mismatch"] + 1) if ex["flow_mismatch"] is not None else float("inf"), len(fails)) if ex else "")
+            if not rm["conditions"]["edge_room"]:
+                why.append("at continuing colour borders (layers %d-%d) the right model's colour-1 edge cannot get room >= 0 while "
+                           "colour 2 on the left stays within %.2f mm of colour 1: the best average is %.4f mm" % (
+                               rm["edge_layers"][0], rm["edge_layers"][-1], DUAL_LIMITS_INTO, rm["edge_room_bound"]) if rm["edge_layers"] else "")
+            txt += "; ".join(w for w in why if w) + "."
+        check("colour_stack_room", rm["feasible"], "Room for the filament: " + txt,
+              value=round(min(v for v in (b["left"]["centre_min"], b["right"]["centre_min"]) if v is not None), 4)
+              if b["left"]["centre_min"] is not None else None, limit=room_min)
+    else:
+        check("colour_stack_room", True, "Room for the filament: no colour offset between the pairs, every layer at its nominal height.",
+              limit=room_min)
 
     # ---- foundation thickness over every head's region and tower -----------------------------------
     glob = [1e9, -1e9]

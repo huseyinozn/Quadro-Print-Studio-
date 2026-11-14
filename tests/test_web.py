@@ -192,26 +192,22 @@ class WebExamplesAndMeshMarks(WebBase):
         self.assertEqual(r["layout"]["count"], 40)
         self.assertEqual(r["model"]["layers"], 83)
 
-    def test_fidget_example_within_owner_limits_is_planned(self):
-        # right copy built from the left model's T0/T2 regions; the synthetic offsets give a
-        # 0.21 mm Y and a split Z deviation within the 0.30 mm owner limits; the into-material and
-        # travel checks are reported separately and pass with the chosen pair-B height
+    def test_fidget_example_refused_for_room_with_values_shown(self):
+        # Y/Z within the owner limits, into-material and travel checks pass; the room for the filament
+        # where colours stack cannot be made enough on both models (one shared Z and E per pair)
         st, r = self.plan_example("fidgets-2c")
         self.assertEqual(st, 200)
-        self.assertEqual(r["state"], "planned", r.get("problems"))
+        self.assertEqual(r["state"], "rejected")
+        self.assertEqual({p["code"] for p in r["problems"]}, {"PLAN_COLOUR_STACK_ROOM"})
         L = r["layout"]
         ck = {c["name"]: c for c in L["checks"]}
-        self.assertTrue(ck["colour_mapping"]["ok"])
-        for name in ("pair_y_registration", "pair_z_consistency"):
-            self.assertTrue(ck[name]["ok"])
-            self.assertLessEqual(ck[name]["value"], ck[name]["limit"])
-            self.assertEqual(ck[name]["limit"], 0.30)
-        self.assertTrue(ck["into_material"]["ok"])
-        self.assertTrue(ck["travel_drag"]["ok"])
-        self.assertEqual([(m["head"], m["model"], m["colour"]) for m in L["mapping"]],
-                         [(0, "left", 1), (1, "right", 1), (2, "left", 2), (3, "right", 2)])
+        for name in ("colour_mapping", "pair_y_registration", "pair_z_consistency", "into_material", "travel_drag"):
+            self.assertTrue(ck[name]["ok"], name)
+        self.assertFalse(ck["colour_stack_room"]["ok"])
+        self.assertIn("left", L["room"]["before"])
+        self.assertIn("right", L["room"]["before"])
         st, _, _ = self.req("/api/download/" + r["job_id"])
-        self.assertEqual(st, 403)                                  # nothing before verification
+        self.assertEqual(st, 403)
 
     def test_own_upload_of_differently_coloured_models_not_changed(self):
         # the same file uploaded as the user's own model: its right model is NOT silently replaced

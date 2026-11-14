@@ -46,6 +46,7 @@ PLAIN = {
     "PLAN_PAIR_Z_CONSISTENCY": "Height (Z): where one colour is printed on the other, the layer is further from its nominal height than allowed (each pair prints both models at one shared height).",
     "PLAN_PAIR_Y_REGISTRATION": "Colour alignment (Y): the two colours of a model are shifted against each other by more than allowed (each pair prints both models at one shared Y).",
     "PLAN_INTO_MATERIAL": "A nozzle would print or descend lower than the other colour's material beside or below it (layer, head and position are listed in the layout).",
+    "PLAN_COLOUR_STACK_ROOM": "Room for the filament: where one colour is printed on the other, there is not enough room under the nozzle on both models, and the pair heights and the shared filament amount cannot be set to fit both models at once.",
     "PLAN_TRAVEL_DRAG": "A travel or wipe would pass through the other colour's material.",
     "PLAN_TOWER_CLEARANCE": "The wipe towers would be too close to the models.",
     "PLAN_PAIR_PARKS": "A printing pair would come too close to the parked heads.",
@@ -100,6 +101,7 @@ VERIFY_PLAIN = {
     "TOWER_THICKNESS": "A wipe tower layer has the wrong thickness.",
     "TOWER_BASE": "A wipe tower layer has nothing below it.",
     "DUAL_Z_DEVIATION": "Where one colour is printed on the other, the layer is further from its nominal height than allowed.",
+    "DUAL_STACK_ROOM": "Where one colour is printed on the other there is not enough room under the nozzle for the filament.",
     "DUAL_INTO_MATERIAL": "A nozzle prints or descends lower than the other colour's material.",
     "DUAL_TRAVEL_DRAG": "A travel or wipe passes through the other colour's material.",
     "CARRIAGE_DETOUR": "A waiting head is moved towards the printing heads and back (unnecessary carriage travel).",
@@ -170,4 +172,5 @@ def verify_summary(res, exit_code):
         z_deviation_mm=(res.get("dual_z_deviation") or {}).get("max_mm"),
         into_material_mm=(res.get("dual_into_material") or {}).get("deepest_seen_mm"),
         travel_drag_mm=(res.get("dual_travel_drag") or {}).get("deepest_seen_mm"),
-        limits=res.get("dual_limits"))
+        limits=res.get("dual_limits"),
+        stack_room=res.get("dual_stack_room"), stack_room_min=res.get("dual_stack_room_min_mm"))
