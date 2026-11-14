@@ -233,6 +233,7 @@ class Sim:
                           h_meas_min=1e9, h_meas_max=-1e9, copy_thick_max_dev=0.0, copy_thick_where=None,
                           first_layer_max_dev=0.0, first_layer_where=None, first_layer_points=0)
         self.unknown = {}
+        self.known_d = {}
         self.layer_events = []
         # heads that must not print: once parked they must stay parked, inactive and unsynced
         self.heads = list(heads)
@@ -297,7 +298,8 @@ class Sim:
     def align(self, v, t, recs):
         """Align one nozzle's moves in a visit with the slicer block of that layer."""
         L = v["layer"]
-        blk = self.model.blocks[L - 1] if 1 <= L <= self.model.layer_count else None
+        mdl = self.model_for(t)
+        blk = mdl.blocks[L - 1] if 1 <= L <= mdl.layer_count else None
         summ = dict(nozzle=t, layer=L, slot_hint=v["slot"], line=v["line"], tools=tuple(v["tools"]), ok=False, issues=[])
         if blk is None:
             summ["issues"].append("layer outside slice")
@@ -327,6 +329,8 @@ class Sim:
         s0 = smoves[0]
         d = (recs[j][1] - s0.x0, recs[j][2] - s0.y0)
         summ["d"] = (round(d[0], 4), round(d[1], 4))
+        if t in v["d"]:
+            summ["d"] = v["d"][t]          # the copy key (stable across output rounding)
         za = array("d")
         ea = array("d")
         fa = array("d")
@@ -632,11 +636,22 @@ class Sim:
                 self.purge_piece(t, rec)
 
     # ------------------------------------------------------------------ physical checks
+    def model_for(self, t):
+        """Slice model nozzle t reproduces (Dual mode: the pair primary's region)."""
+        return self.model
+
+    def owner_key(self, t, v):
+        """Deposit owner used for own-copy thickness and travel checks."""
+        return (t, v["d"][t])
+
+    def current_layer(self):
+        return self.visit["layer"] if self.visit is not None else 0
+
     def copy_key(self, t):
         v = self.visit
         if v is None or t not in v["d"]:
             return None
-        return (t, v["d"][t])
+        return self.owner_key(t, v)
 
     def on_extrude(self, t, rec, ln):
         ln_, x0, y0, x1, y1, z0, z1, e, f, kind, _h = rec[:11]
@@ -645,21 +660,30 @@ class Sim:
         hret = None
         if v is not None:
             if t not in v["d"]:
-                blk = self.model.blocks[v["layer"] - 1]
+                blk = self.model_for(t).blocks[v["layer"] - 1]
                 s0 = blk.moves()[0]
-                v["d"][t] = (round(x0 - s0.x0, 2), round(y0 - s0.y0, 2))
+                d = (x0 - s0.x0, y0 - s0.y0)
+                # one key per physical copy: reuse a known placement of this nozzle within
+                # 0.02 mm (output rounding can put the same copy on both sides of a 0.01 step)
+                known = self.known_d.setdefault(t, [])
+                hit = next((k for k in known if abs(k[0] - d[0]) <= 0.02 and abs(k[1] - d[1]) <= 0.02), None)
+                if hit is None:
+                    hit = (round(d[0], 2), round(d[1], 2))
+                    known.append(hit)
+                v["d"][t] = hit
                 self.first_extrusion(t, rec, v)
-            owner = (t, v["d"][t])
+            owner = self.owner_key(t, v)
             L = v["layer"]
+            mdl = self.model_for(t)
             mz = self.mesh.z(x1, y1)
             if L == 1:
-                dev = (z1 - mz) - self.model.blocks[0].z
+                dev = (z1 - mz) - mdl.blocks[0].z
                 self.stats["first_layer_points"] += 1
                 if abs(dev) > abs(self.stats["first_layer_max_dev"]):
                     self.stats["first_layer_max_dev"] = dev
                     self.stats["first_layer_where"] = dict(line=ln, nozzle=t, x=round(x1, 3), y=round(y1, 3))
                 if abs(dev) > TOL["first_layer"]:
-                    self.issue("error", "FIRST_LAYER_HEIGHT", "T%d layer-1 nozzle %.4f mm above bed (nominal %.3f)" % (t, z1 - mz, self.model.blocks[0].z), ln)
+                    self.issue("error", "FIRST_LAYER_HEIGHT", "T%d layer-1 nozzle %.4f mm above bed (nominal %.3f)" % (t, z1 - mz, mdl.blocks[0].z), ln)
             # local thickness via plane fit on previous layer of the same copy
             layers = self.copy_layers.setdefault(owner, {})
             cur = layers.get(L)
@@ -680,7 +704,7 @@ class Sim:
                         self.stats["thickness_checked"] += 1
                         self.stats["h_meas_min"] = min(self.stats["h_meas_min"], h)
                         self.stats["h_meas_max"] = max(self.stats["h_meas_max"], h)
-                        nominal = self.model.blocks[L - 1].height
+                        nominal = mdl.blocks[L - 1].height
                         if L > self.found_layers:
                             dev = h - nominal
                             if abs(dev) > abs(self.stats["copy_thick_max_dev"]):
@@ -708,7 +732,7 @@ class Sim:
         if kind == "eonly" or not (self.over_bed(x0) or self.over_bed(x1)):
             return
         me = self.copy_key(t)
-        cur_layer = self.visit["layer"] if self.visit is not None else 0
+        cur_layer = self.current_layer()
         L = math.hypot(x1 - x0, y1 - y0)
         n = max(1, int(L / 1.0))
         g = self.grid
@@ -722,7 +746,7 @@ class Sim:
                 if kind == "z" and z1 < z0:
                     # approach descent onto the part: must not end inside material (centre cell)
                     top, _ = g.local(x, y, rad=0)
-                    if top > -1e8 and z - top < -TOL["descend_margin"]:
+                    if top > -1e8 and z - top < -getattr(self, "descend_margin", TOL["descend_margin"]):
                         self.issue("error", "DESCENT_INTO_MATERIAL", "T%d descends %.4f mm into material" % (t, top - z), ln)
                     continue
                 top, _ = g.local(x, y, rad=1)
@@ -1109,7 +1133,8 @@ def analyse(sim: Sim, expected_count=None, min_gap=2.0):
     # placement geometry: distinct copies, gaps between physical footprints (bbox + hull)
     from .geometry import poly_distance, translate
     hull = model.hull
-    placed = sorted(per_copy_layers)
+    dual = getattr(sim, "dual", False)
+    placed = sorted(per_copy_layers) if not dual else []   # Dual: model gaps are checked on deposited cells
     hulls = {k: translate(hull, k[1][0], k[1][1]) for k in placed}
     gmin, gpair = 1e9, None
     for i in range(len(placed)):
@@ -1122,8 +1147,9 @@ def analyse(sim: Sim, expected_count=None, min_gap=2.0):
                 gmin, gpair = dd, (placed[i], placed[j])
     res["min_gap_between_copies"] = round(gmin, 4)
     res["min_gap_pair"] = [("T%d" % k[0], k[1]) for k in gpair] if gpair else None
-    if gmin < min_gap:
+    if gmin < min_gap and not dual:
         sim.issue("error", "COPY_OVERLAP", "deposited footprints of two copies only %.3f mm apart" % gmin, 0)
+    placed = sorted(per_copy_layers)
     res["placements"] = [dict(nozzle=k[0], d=k[1], center=(round(k[1][0] + 0.5 * (model.bbox_extrude[0] + model.bbox_extrude[2]), 3),
                                                              round(k[1][1] + 0.5 * (model.bbox_extrude[1] + model.bbox_extrude[3]), 3)))
                          for k in placed]
@@ -1146,7 +1172,7 @@ def analyse(sim: Sim, expected_count=None, min_gap=2.0):
             blocks.append(t)
     res["foundation_head_sequence"] = blocks
     res["foundation_independent"] = blocks == heads
-    if blocks != heads:
+    if blocks != heads and not dual:
         sim.issue("error", "FOUNDATION_ORDER", "foundation printed by heads %s, expected %s one after another" % (blocks, heads), 0)
     # COPY entry exactly after the foundation: layers <= F printed by ONE nozzle per visit,
     # layers > F by exactly the printing heads together (decided from actual extrusion)
@@ -1156,6 +1182,8 @@ def analyse(sim: Sim, expected_count=None, min_gap=2.0):
             per_visit.setdefault(v["line"], dict(layer=v["layer"], nozzles=set()))["nozzles"].add(v["nozzle"])
     wrong = []
     for line, pv in sorted(per_visit.items()):
+        if dual:
+            break                       # Dual: pair membership is checked in verify_dual
         if pv["layer"] <= F and len(pv["nozzles"]) != 1:
             wrong.append("layer %d at line %d printed by %s (expected one head)" % (pv["layer"], line, sorted(pv["nozzles"])))
         if pv["layer"] > F and sorted(pv["nozzles"]) != heads:
@@ -1163,7 +1191,7 @@ def analyse(sim: Sim, expected_count=None, min_gap=2.0):
     first_copy = min((pv["layer"] for pv in per_visit.values() if len(pv["nozzles"]) > 1), default=None)
     res["synchronized_from_layer"] = first_copy
     res["copy_phase_problems"] = wrong[:10]
-    if wrong or (first_copy is not None and first_copy != F + 1):
+    if (wrong or (first_copy is not None and first_copy != F + 1)) and not dual:
         sim.issue("error", "COPY_PHASE", "synchronised printing does not start exactly at layer %d with heads %s: %s"
                   % (F + 1, heads, wrong[:2] or ["starts at layer %s" % first_copy]), 0)
     res["parked_heads"] = dict(heads=["T%d" % t for t in sim.unused],

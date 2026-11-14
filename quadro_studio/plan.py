@@ -73,7 +73,6 @@ class LayoutOptions:
     purge_step: float = 2.0
     purge_edge_margin: float = 10.0
     purge_lane_gap: float = 0.7
-    preheat_lead_layers: int | None = None   # start heating the next head this many layers before it prints
     head_margin: float = 5.0              # auto layout: synchronized heads keep min_clearance + this margin
     park_margin: float = 0.0              # extra gap (mm) above min clearance for stacked (non-endstop) parks
     parallel_speed: float = 350.0
@@ -85,8 +84,7 @@ class LayoutOptions:
     def resolved(self):
         d = asdict(self)
         d["heads"] = list(range(MODES.get(self.mode, MODES["farm"])["heads"]))
-        if d["preheat_lead_layers"] is None:
-            d["preheat_lead_layers"] = 1 if self.mode == "copy" else 0
+
         if self.preset in PRESETS:
             for k, v in PRESETS[self.preset].items():
                 if d.get(k) is None:

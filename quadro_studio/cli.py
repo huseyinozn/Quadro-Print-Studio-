@@ -62,8 +62,9 @@ def _add_inputs(p, profile=True):
 
 
 def _add_layout(p):
-    p.add_argument("--mode", default="farm", choices=["farm", "copy"],
-                   help="farm: identical copies on T0-T3 (count multiple of 4); copy: 2 copies on T0+T1, T2/T3 parked")
+    p.add_argument("--mode", default="farm", choices=["farm", "copy", "dual"],
+                   help="farm: identical copies on T0-T3 (count multiple of 4); copy: 2 copies on T0+T1, T2/T3 parked; "
+                        "dual: two two-colour copies (left T0/T2, right T1/T3), 4-tool slice")
     p.add_argument("--count", type=int, default=40, help="number of copies (farm: multiple of 4; copy: 2)")
     p.add_argument("--preset", default="reference-300", choices=list(PRESETS) + ["auto"])
     p.add_argument("--sync-pitch", dest="sync_pitch", type=float)
@@ -131,7 +132,33 @@ def build_plan(a, diags):
     return model, prof, plan
 
 
+def _dual_opts(a):
+    from .dualplan import DualOptions
+    o = DualOptions()
+    for k in ("min_gap", "foundation_layers", "standby_temp", "travel_clearance", "max_segment"):
+        v = getattr(a, k, None)
+        if v is not None:
+            setattr(o, k, v)
+    return o
+
+
+def build_dual(a, diags, strict):
+    """Dual Color Copy Mode inputs: 4-tool slice + profile -> (dual, prof, plan)."""
+    from .dualslice import load_dual
+    from .dualplan import make_dual_plan
+    dual, d1 = load_dual(a.slice, Diagnostics(), strict=strict)
+    diags.extend(d1)
+    prof, d2 = load_profile(a.profile, a.mesh_profile)
+    diags.extend(d2)
+    profile_checks(prof, diags)
+    plan, d3 = make_dual_plan(dual, prof, _dual_opts(a))
+    diags.extend(d3)
+    return dual, prof, plan
+
+
 def cmd_plan(a):
+    if a.mode == "dual":
+        return cmd_plan_dual(a)
     t0 = time.time()
     diags = Diagnostics()
     out = dict(stage="plan")
@@ -158,7 +185,88 @@ def cmd_plan(a):
     return 0 if out["ok"] else 2
 
 
+def cmd_plan_dual(a):
+    t0 = time.time()
+    diags = Diagnostics()
+    out = dict(stage="plan", mode="dual")
+    plan = None
+    try:
+        dual, prof, plan = build_dual(a, diags, strict=False)
+        out["plan"] = plan.as_json() if plan is not None else None
+        out["region_differences"] = dual.region_differences
+    except StageError as e:
+        diags = e.diags
+    out["diagnostics"] = diags.as_list()
+    out["ok"] = diags.ok() and plan is not None
+    out["elapsed_s"] = round(time.time() - t0, 2)
+    _write_json(a.out, out)
+    print(diags.render() or "no diagnostics")
+    if plan is not None:
+        for c in plan.checks:
+            print("  [%s] %s: %s" % ("ok" if c["ok"] else "FAIL", c["name"], c["detail"]))
+    print("plan: %s (%.1fs)" % ("OK" if out["ok"] else "FAILED", time.time() - t0))
+    return 0 if out["ok"] else 2
+
+
+def cmd_generate_dual(a):
+    t0 = time.time()
+    diags = Diagnostics()
+    report = dict(stage="generate", mode="dual", inputs=dict(slice=os.path.basename(a.slice), profile=os.path.basename(a.profile)))
+    plan = None
+    try:
+        dual, prof, plan = build_dual(a, diags, strict=True)
+    except StageError as e:
+        diags = e.diags
+    ok = diags.ok() and plan is not None
+    if ok:
+        from .dualgen import generate_dual
+        text, info = generate_dual(dual, prof, plan, _sha(a.slice), prof.fingerprint)
+        tmp = a.out + ".partial"
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.replace(tmp, a.out)
+        report["output"] = dict(path=os.path.basename(a.out), **info)
+        report["plan"] = plan.as_json()
+    elif os.path.exists(a.out):
+        os.remove(a.out)
+    report["diagnostics"] = diags.as_list()
+    report["ok"] = ok
+    report["elapsed_s"] = round(time.time() - t0, 2)
+    _write_json(a.report, report)
+    print(diags.render() or "no diagnostics")
+    print("generate: %s -> %s (%.1fs)" % ("OK" if ok else "REFUSED (no G-code written)", a.out if ok else "-", time.time() - t0))
+    return 0 if ok else 2
+
+
+def cmd_verify_dual(a):
+    t0 = time.time()
+    from .dualslice import load_dual
+    from .verify import TOL
+    from .verify_dual import verify_dual
+    diags = Diagnostics()
+    dual, d1 = load_dual(a.slice, diags, strict=True)
+    prof, d2 = load_profile(a.profile, a.mesh_profile)
+    diags.extend(d2)
+    profile_checks(prof, diags)
+    if not diags.ok():
+        print(diags.render())
+        return 2
+    res, _sim = verify_dual(prof, dual.models, a.gcode, a.foundation_layers or 3)
+    out = dict(stage="verify", mode="dual", candidate=os.path.basename(a.gcode), candidate_sha256=_sha(a.gcode),
+               slice_sha256=_sha(a.slice), profile_fingerprint=prof.fingerprint, tolerances=TOL,
+               candidate_result=res, profile_diagnostics=diags.as_list())
+    print("candidate: %s, %d errors, regions %s, %.1fs" % ("PASS" if res["passed"] else "FAIL", res["error_count"],
+                                                          res.get("dual_region_layers_ok"), time.time() - t0))
+    for i in res["issues"][:10]:
+        print("  %s %s" % (i["code"], i["message"][:200]))
+    out["elapsed_s"] = round(time.time() - t0, 2)
+    _write_json(a.out, out)
+    return 0 if res["passed"] else 3
+
+
 def cmd_generate(a):
+    if a.mode == "dual":
+        return cmd_generate_dual(a)
     t0 = time.time()
     diags = Diagnostics()
     report = dict(stage="generate", inputs=dict(slice=os.path.basename(a.slice), profile=os.path.basename(a.profile)))
@@ -190,6 +298,10 @@ def cmd_generate(a):
 
 
 def cmd_verify(a):
+    if a.mode == "dual":
+        return cmd_verify_dual(a)
+    if a.foundation_layers is None:
+        a.foundation_layers = 5
     t0 = time.time()
     from .verify import Sim, analyse, compare, TOL
     diags = Diagnostics()
@@ -228,6 +340,9 @@ def cmd_verify(a):
 
 
 def cmd_preview(a):
+    if a.mode == "dual":
+        print("preview: dual mode preview is part of the web UI (plan --mode dual --out plan.json for data)")
+        return 2
     diags = Diagnostics()
     try:
         model, prof, plan = build_plan(a, diags)
@@ -268,9 +383,10 @@ def main(argv=None):
     p = sub.add_parser("verify", help="independently simulate and check generated G-code (optionally against an oracle)")
     _add_inputs(p)
     p.add_argument("--gcode", required=True)
-    p.add_argument("--mode", default="farm", choices=["farm", "copy"])
+    p.add_argument("--mode", default="farm", choices=["farm", "copy", "dual"])
     p.add_argument("--count", type=int, default=40)
-    p.add_argument("--foundation-layers", dest="foundation_layers", type=int, default=5)
+    p.add_argument("--foundation-layers", dest="foundation_layers", type=int, default=None,
+                   help="default 5 (farm/copy) or 3 (dual)")
     p.add_argument("--min-gap", dest="min_gap", type=float, default=2.0)
     p.add_argument("--oracle", default=None, help="golden G-code used ONLY for comparison")
     p.add_argument("--out", default=None)

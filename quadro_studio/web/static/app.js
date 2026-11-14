@@ -14,7 +14,8 @@
   let phase = "all";
   let source = "upload";   // "upload" | "example"
   let exampleId = "sharks-40";
-  let mode = "farm";        // "farm" | "copy"
+  let mode = "farm";        // "farm" | "copy" | "dual"
+  let pLayer = null;        // dual preview layer
   let examples = [];
 
   const els = {
@@ -35,19 +36,27 @@
     els.genStatus.textContent = "";
     els.gen.disabled = false;
     const haveModel = source === "example" || els.model.files.length === 1;
-    const ready = els.profile.files.length === 1 && haveModel && (mode === "copy" || countValue() >= 4);
+    const ready = els.profile.files.length === 1 && haveModel && (mode !== "farm" || countValue() >= 4);
     els.check.disabled = !ready;
     $("copy-info").textContent = "Tap a copy to see its details.";
+    $("mapping").classList.add("hidden");
+    $("layer-pick").classList.add("hidden");
+    els.gen.classList.remove("hidden");
   }
 
   function setMode(m) {
     mode = m;
     $("mode-farm").checked = m === "farm";
     $("mode-copy").checked = m === "copy";
-    $("copies-help").classList.toggle("hidden", m === "copy");
-    $("stepper").classList.toggle("hidden", m === "copy");
+    $("mode-dual").checked = m === "dual";
+    $("copies-help").classList.toggle("hidden", m !== "farm");
+    $("stepper").classList.toggle("hidden", m !== "farm");
     $("copy-fixed").classList.toggle("hidden", m !== "copy");
-    if (m === "copy") els.count.value = 2;
+    $("dual-fixed").classList.toggle("hidden", m !== "dual");
+    $("upload-help").textContent = m === "dual"
+      ? "G-code from Co Print Slicer with two identical two-colour models and four tools: left model T0 + T2, right model T1 + T3."
+      : "G-code of one single-colour model from Co Print Slicer, sliced once for T0.";
+    if (m !== "farm") els.count.value = 2;
     else if (countValue() < 4) els.count.value = 40;
     // an example belongs to one mode; switching mode drops a mismatching example
     const ex = examples.find(e => e.id === exampleId);
@@ -74,6 +83,7 @@
 
   $("mode-farm").addEventListener("change", () => setMode("farm"));
   $("mode-copy").addEventListener("change", () => setMode("copy"));
+  $("mode-dual").addEventListener("change", () => setMode("dual"));
 
   function setSource(src, count, exId) {
     source = src;
@@ -177,6 +187,10 @@
 
   function showReject(res, my) {
     if (my !== epoch) return;
+    if (res.layout && res.layout.mode === "dual") {
+      showLayout(res);                 // show what would be printed where, and why it stops
+      els.gen.classList.add("hidden");
+    }
     els.rejectCard.classList.remove("hidden");
     const ul = $("problems");
     ul.innerHTML = "";
@@ -202,6 +216,7 @@
   function showLayout(res) {
     const L = res.layout;
     els.layoutCard.classList.remove("hidden");
+    if (L.mode === "dual") return showDual(res);
     const m = res.model;
     $("layout-sub").textContent = `${L.count} copies · ${m.footprint_mm[0]} × ${m.footprint_mm[1]} mm · ${m.layers} layers`;
     const F = L.foundation_layers;
@@ -297,6 +312,117 @@
     }
   }
 
+  // ---------------------------------------------------------------- dual colour preview
+  const MODEL = { left: "Left model", right: "Right model" };
+
+  function showDual(res) {
+    const L = res.layout, m = res.model, F = L.foundation_layers;
+    $("layout-sub").textContent = `2 two-colour copies · ${m.footprint_mm[0]} × ${m.footprint_mm[1]} mm each · ${m.layers} layers`;
+    const ph = $("phases");
+    ph.innerHTML = "";
+    const phases = [["all", "All heads"], ["solo", `Layers 1–${F} · each head alone`], ["A", `Layers ${F + 1}–${L.total_layers} · T0 + T1`], ["B", `Layers ${F + 1}–${L.total_layers} · T2 + T3`]];
+    for (const [k, label] of phases) {
+      const b = document.createElement("button");
+      b.type = "button"; b.setAttribute("role", "tab"); b.textContent = label; b.dataset.phase = k;
+      b.addEventListener("click", () => { phase = k; if (k === "solo") pLayer = 1; else if ((k === "A" || k === "B") && pLayer <= F) pLayer = F + 1; drawDual(L); });
+      ph.appendChild(b);
+    }
+    const lp = $("layer-pick");
+    lp.classList.remove("hidden");
+    lp.innerHTML = "";
+    for (const n of L.preview_layers) {
+      const b = document.createElement("button");
+      b.type = "button"; b.setAttribute("role", "tab"); b.textContent = "Layer " + n; b.dataset.layer = n;
+      b.addEventListener("click", () => { pLayer = n; drawDual(L); });
+      lp.appendChild(b);
+    }
+    phase = "all";
+    pLayer = L.region_marks.length ? L.region_marks[0].first_layer : F + 1;
+    drawDual(L);
+    $("legend").innerHTML = L.mapping.map(r => `<span><i style="background:${L.colours[r.head]}"></i>${HEADS[r.head]}: ${MODEL[r.model].toLowerCase()}, colour ${r.colour}</span>`).join("") +
+      `<span><i style="background:transparent;border:2px solid var(--ink)"></i>Wipe tower (10 × 10 mm) per head</span>` +
+      (L.region_marks.length ? `<span><i style="background:transparent;border:2px dashed var(--bad)"></i>Region that differs between the two models</span>` : "");
+    const w = $("warnings");
+    w.innerHTML = "";
+    for (const x of res.warnings || []) {
+      const li = document.createElement("li");
+      li.textContent = x.text;
+      if (x.code === "MESH_DEVIATING_POINT") { const s = document.createElement("small"); s.textContent = x.detail; li.appendChild(s); }
+      w.appendChild(li);
+    }
+    const mp = $("mapping");
+    mp.classList.remove("hidden");
+    const why = (L.checks.filter(c => !c.ok).map(c => `<div class="why">✗ ${escapeHtml(c.detail)}</div>`).join(""));
+    mp.innerHTML = `<table><thead><tr><th>Head</th><th>Model</th><th>Colour</th><th>Layers 1–${F}</th><th>From layer ${F + 1}</th></tr></thead><tbody>` +
+      L.mapping.map(r => `<tr data-head="${r.head}"><td>${HEADS[r.head]}</td><td>${MODEL[r.model]}</td><td><span class="sw" style="background:${L.colours[r.head]}"></span>${r.colour}</td><td>alone</td><td>with ${r.pair.replace("T" + r.head, "").replace(" + ", "").trim()} (pair ${r.pair})</td></tr>`).join("") +
+      `</tbody></table>` +
+      `<p class="fine">Order on every layer from ${F + 1}: T0 + T1 print colour 1 on both models, park, then T2 + T3 print colour 2. Each head starts every layer on its own wipe tower.</p>` + why;
+    $("checklist").innerHTML = L.checks.map(c => `<li>${c.ok ? "✓" : "✗"} ${escapeHtml(c.detail)}</li>`).join("");
+    $("copy-info").textContent = "Tap a coloured region to see which head prints it.";
+  }
+
+  function drawDual(L) {
+    const F = L.foundation_layers;
+    for (const b of $("phases").children) b.setAttribute("aria-selected", String(b.dataset.phase === phase));
+    for (const b of $("layer-pick").children) b.setAttribute("aria-selected", String(parseInt(b.dataset.layer, 10) === pLayer));
+    const solo = pLayer <= F;
+    const on = (t) => phase === "all" || phase === "solo" || (phase === "A" ? t < 2 : phase === "B" ? t >= 2 : true);
+    const notes = {
+      all: `Layer ${pLayer}: ${solo ? "each head prints its region alone (T0, T1, T2, T3), right after its own prime line." : "T0 + T1 print colour 1 on both models together, then T2 + T3 print colour 2."}`,
+      solo: `Layers 1–${F}: every head prints its own region alone on its own measured bed height. Layer ${pLayer} shown.`,
+      A: `From layer ${F + 1}: T0 (left model) and T1 (right model) print colour 1 at the same time, ${L.spacing.toFixed(1)} mm apart. T2 and T3 wait parked.`,
+      B: `From layer ${F + 1}: after T0 + T1 park, T2 (left model) and T3 (right model) print colour 2 of the same layer.`,
+    };
+    $("phase-note").textContent = notes[phase];
+    const svg = $("bed");
+    svg.innerHTML = "";
+    const xs = Object.values(L.hulls).flat().concat(Object.values(L.towers).flat());
+    const x0 = Math.min(...xs.map(p => p[0])) - 12, x1 = Math.max(...xs.map(p => p[0])) + 12;
+    const y0 = Math.min(...xs.map(p => p[1])) - 12, y1 = Math.max(...xs.map(p => p[1])) + 12;
+    svg.setAttribute("viewBox", `${x0} ${300 - y1} ${x1 - x0} ${y1 - y0}`);
+    const Y = (y) => 300 - y;
+    el("rect", { x: x0, y: 300 - y1, width: x1 - x0, height: y1 - y0, fill: "var(--bed)", stroke: "var(--line)", "stroke-width": 0.3 }, svg);
+    for (const t of [0, 2, 1, 3]) {
+      const d = (L.regions[pLayer] || {})[t];
+      if (!d) continue;
+      const p = el("path", { d, fill: "none", stroke: L.colours[t], "stroke-width": 0.45, "stroke-linecap": "round", "stroke-linejoin": "round", opacity: on(t) ? 1 : 0.12, "data-head": t }, svg);
+    }
+    for (const t of [0, 1, 2, 3]) {
+      const hull = L.hulls[t];
+      const hit = el("polygon", { points: hull.map(([x, y]) => `${x},${Y(y)}`).join(" "), fill: "transparent", stroke: "none", "data-region": t }, svg);
+      hit.addEventListener("click", () => showRegion(t, L));
+      const sq = L.towers[t];
+      el("polygon", { points: sq.map(([x, y]) => `${x},${Y(y)}`).join(" "), fill: L.colours[t], "fill-opacity": on(t) ? 0.5 : 0.08, stroke: "var(--ink)", "stroke-width": 0.3, opacity: on(t) ? 1 : 0.3 }, svg);
+      const cx = sq.reduce((a, p) => a + p[0], 0) / 4, cy = sq.reduce((a, p) => a + p[1], 0) / 4;
+      el("text", { x: cx, y: Y(cy) + 1.2, "font-size": 3.4, "text-anchor": "middle", fill: "var(--ink)", opacity: on(t) ? 1 : 0.3 }, svg).textContent = "T" + t;
+    }
+    for (const side of ["left", "right"]) {
+      const h = L.hulls[side === "left" ? 0 : 1];
+      const cx = h.reduce((a, p) => a + p[0], 0) / h.length, top = Math.max(...h.map(p => p[1]));
+      el("text", { x: cx, y: Y(top) - 3, "font-size": 4.2, "text-anchor": "middle", fill: "var(--muted)" }, svg).textContent = MODEL[side] + (side === "left" ? " · T0 / T2" : " · T1 / T3");
+    }
+    for (const mk of L.region_marks) {
+      if (!mk.layers.includes(pLayer)) continue;
+      const [a, b, c, d] = mk.rect;
+      el("rect", { x: Math.min(a, c) - 1, y: Y(Math.max(b, d)) - 1, width: Math.abs(c - a) + 2, height: Math.abs(d - b) + 2, fill: "none", stroke: "var(--bad)", "stroke-width": 0.6, "stroke-dasharray": "1.5 1", "data-diff": mk.head, "pointer-events": "none" }, svg);
+    }
+  }
+
+  function showRegion(t, L) {
+    const r = L.mapping[t], F = L.foundation_layers;
+    const mate = { 0: 1, 1: 0, 2: 3, 3: 2 }[t];
+    let html = `<b>${HEADS[t]}</b> · ${MODEL[r.model]} · colour ${r.colour} <span class="sw" style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${L.colours[t]}"></span>
+      <div>Layers 1–${F}: prints this region alone. From layer ${F + 1}: prints it together with ${HEADS[mate]} (${r.pair}), ${t < 2 ? "first" : "after T0 + T1 have parked"}.</div>`;
+    const diff = L.region_marks.filter(m => m.head === t);
+    if (diff.length) html += `<div>This region differs from the other model's on layers ${diff[0].layers.slice(0, 8).join(", ")}${diff[0].layers.length > 8 ? "…" : ""} (dashed box), so it cannot be printed as a copy.</div>`;
+    for (const e of (L.mesh_effects[t] || [])) {
+      html += `<div class="eff"><span>Marked mesh point</span><b>(${e.point[0]}, ${e.point[1]}) = ${e.point_z} mm</b>
+        <span>Calculated effect on the first layer</span><b>up to ${e.first_layer_mm.toFixed(3)} mm</b>
+        <span>Calculated effect on the common height at the end of layer ${F}</span><b>up to ${e.layer_end_top_mm.toFixed(3)} mm</b></div>`;
+    }
+    $("copy-info").innerHTML = html;
+  }
+
   function showCopy(c, L) {
     const box = $("copy-info");
     const F = L.foundation_layers;
@@ -364,7 +490,26 @@
     const body = $("result-body");
     body.innerHTML = "";
     const v = s.verify || {};
-    if (s.state === "passed") {
+    if (s.state === "passed" && v.mode === "dual") {
+      $("result-h").textContent = "Software checks passed";
+      const reg = v.region_layers_ok || {};
+      body.innerHTML = `
+        <div class="ok-box">Software checks passed</div>
+        <div class="facts">
+          <span>Colour regions reproduced (per head, all layers)</span><b id="dual-regions">${["T0", "T1", "T2", "T3"].map(h => `${h} ${reg[h] || "–"}`).join(" · ")}</b>
+          <span>Colour registration left / right model</span><b>${fmt((v.registration_mm || {}).left, 3)} / ${fmt((v.registration_mm || {}).right, 3)} mm</b>
+          <span>Pairs print together from layer</span><b>${v.synchronized_from_layer ?? "–"}</b>
+          <span>Gap between the two models</span><b>${fmt(v.min_gap_models_mm)} mm</b>
+          <span>Wipe towers from the models</span><b>${fmt(v.tower_gap_mm)} mm</b>
+          <span>First-layer height error</span><b>${fmt(Math.abs(v.first_layer_max_dev_mm || 0) * 1000, 1)} µm</b>
+          <span>Lowest travel above printed parts</span><b>${fmt(v.min_transfer_clearance_mm)} mm</b>
+          <span>Head spacing while printing together</span><b>${fmt(v.min_sync_head_gap_mm)} mm</b>
+          <span>Heads parked, heaters off at the end</span><b>${v.final_parked && v.heaters_off ? "yes" : "no"}</b>
+        </div>
+        <a class="download" id="download" href="${s.download_url}" download="${escapeHtml(s.filename)}">Download G-code</a>
+        <p class="fine">These are software checks of the generated file. It has not been tested on your printer. Watch the first layers of each head.</p>
+        <p class="fine hash">File ${escapeHtml(s.filename)} · SHA-256 ${s.gcode_sha256}</p>`;
+    } else if (s.state === "passed") {
       $("result-h").textContent = "Software checks passed";
       body.innerHTML = `
         <div class="ok-box">Software checks passed</div>

@@ -31,11 +31,23 @@ def _fmt(v, nd):
 
 
 class Emitter:
+    """Collects output lines with an estimated cumulative motion time per line
+    (feedrate-limited distance, no acceleration), used to place preheat
+    commands a given number of seconds before a head is needed."""
+
     def __init__(self):
         self.lines = []
+        self.times = []
+        self.now = 0.0
 
-    def __call__(self, s):
+    def __call__(self, s, dt=0.0):
+        self.now += dt
         self.lines.append(s)
+        self.times.append(self.now)
+
+    def insert(self, idx, s):
+        self.lines.insert(idx, s)
+        self.times.insert(idx, self.times[idx - 1] if idx > 0 else 0.0)
 
     def text(self):
         return "\n".join(self.lines) + "\n"
@@ -55,6 +67,9 @@ class FarmGenerator:
         self.input_sha = input_sha256
         self.profile_fp = profile_fp
         self.counts = dict(part_visits=0, moves=0, pieces=0)
+        self.pos = [None, None, None]
+        self.marks = {}                                # named line indices (kept valid across inserts)
+        self.preheats = []                             # report of placed preheat commands
         cfg = model.config
         self.retract_len = cfg["retraction_length"]
         self.retract_f = cfg["retraction_speed"] * 60.0
@@ -81,14 +96,29 @@ class FarmGenerator:
         if f is not None:
             fs = ("%.3f" % f).rstrip("0").rstrip(".")
             parts.append("F" + fs)
-        self.out(" ".join(parts))
+            self.feed = f
+        dt = 0.0
+        npos = [x if x is not None else self.pos[0], y if y is not None else self.pos[1], z if z is not None else self.pos[2]]
+        if None not in self.pos and None not in npos:
+            dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(npos, self.pos)))
+            if dist == 0 and e is not None:
+                dist = abs(e)
+            v = min(getattr(self, "feed", 3000.0) / 60.0, self.p.max_velocity)
+            if z is not None and x is None and y is None:
+                v = min(v, self.p.max_z_velocity)
+            dt = dist / v if v > 0 else 0.0
+        self.pos = npos
+        self.out(" ".join(parts), dt)
 
     def qpm(self, pos, label):
         self.out("M400")
         self.out("SET_VELOCITY_LIMIT ACCEL=%s ACCEL_TO_DECEL=%s" % (_fmt(self.o["park_accel"], 0), _fmt(self.o["park_accel"] / 2, 0)))
         self.out("; FARM_PARK %s" % label)
+        prev = getattr(self, "carriage", None)
+        dt = (max(abs(pos[t] - prev[t]) for t in range(4)) / self.o["parallel_speed"]) if prev else 0.0
         self.out("QUADRO_PARALLEL_MOVE " + " ".join("T%d=%s" % (t, _fmt(pos[t], 5)) for t in range(4))
-                 + " SPEED=%s MIN_CLEARANCE=%s" % (_fmt(self.o["parallel_speed"], 0), _fmt(self.p.min_clearance, 2)))
+                 + " SPEED=%s MIN_CLEARANCE=%s" % (_fmt(self.o["parallel_speed"], 0), _fmt(self.p.min_clearance, 2)), dt)
+        self.pos = [None, None, self.pos[2]]
         self.out("M400")
         self.carriage = dict(pos)
 
@@ -98,6 +128,31 @@ class FarmGenerator:
             if self.fan[t] != v:
                 self.out("SET_FAN_SPEED FAN=%s SPEED=%s" % (self.p.extruders[t].fan, _fmt(v, 4).rstrip("0").rstrip(".") or "0"))
                 self.fan[t] = v
+
+    def mark(self, name):
+        self.marks[name] = len(self.out.lines)
+
+    def insert_line(self, idx, text):
+        self.out.insert(idx, text)
+        for k, v in self.marks.items():
+            if v >= idx:
+                self.marks[k] = v + 1
+
+    def schedule_preheat(self, head, temp, preheat_time, since_mark):
+        """Insert ``M104 T<head> S<temp>`` so that the estimated motion time from
+        the command to *now* (where the head's M109 follows) is >= preheat_time,
+        but never before ``since_mark`` (the head's own standby command)."""
+        times = self.out.times
+        now = self.out.now
+        lo = self.marks.get(since_mark, 0)
+        idx = len(times)
+        while idx - 1 > lo and now - times[idx - 1] < preheat_time:
+            idx -= 1
+        lead = now - (times[idx - 1] if idx > 0 else 0.0)
+        self.insert_line(idx, "M104 T%d S%s ; preheat %.0f s ahead (preheat_time %.0f s)" % (head, _fmt(temp, 0), lead, preheat_time))
+        self.preheats.append(dict(head=head, line=idx + 1, lead_s=round(lead, 1), wanted_s=preheat_time,
+                                  limited_by_standby=idx - 1 <= lo))
+        return lead
 
     def lift_to(self, z):
         if self.z is None or z > self.z + 1e-9:
@@ -118,7 +173,7 @@ class FarmGenerator:
         """Emit one model block (layer L) for one slot on the given head(s)."""
         b = self.m.blocks[L - 1]
         plan = self.plan
-        t_ref = None if copy else tools[0]
+        t_ref = (plan.pair_of(tools) if hasattr(plan, "pair_of") else None) if copy else tools[0]
         F = plan.foundation_layers
         mv0 = b.moves()[0]
         # approach -------------------------------------------------------------
@@ -275,17 +330,20 @@ class FarmGenerator:
         out("M190 S%s" % _fmt(bed, 0))
         self.qpm(plan.park_home, "park-at-endstop-positions")
         for t in range(4):
+            self.mark("standby_T%d" % t)
             out("M104 T%d S%s" % (t, _fmt(o["standby_temp"] if t in H else 0, 0)))
             out("SET_PRESSURE_ADVANCE EXTRUDER=%s ADVANCE=%s" % (EXTR[t], repr(m.pressure_advance)))
             self.set_fans([t], 0.0)
         out("SET_PRINT_STATS_INFO TOTAL_LAYER=%d CURRENT_LAYER=1" % nL)
 
         # ---------------- independent foundation, one head after another -------------
-        lead = int(o.get("preheat_lead_layers") or 0)
-        preheated = set()
+        # Copy Mode: a waiting head is preheated by time (slice preheat_time) ahead of its
+        # M109, placed in the actual new print order. Farm keeps heating at its turn (unchanged).
+        timed = plan.mode != "farm"
+        pre_t = float(m.config.get("preheat_time", 0.0) or 0.0)
         for ai, a in enumerate(H):
             out("; ===== FOUNDATION T%d: layers 1..%d, %d slots =====" % (a, F, len(slots)))
-            if a not in preheated:
+            if not (timed and ai > 0):
                 out("M104 T%d S%s" % (a, _fmt(temp, 0)))
             zp = max(self.safe_z([0, 1, 2, 3], o["park_clearance"]), o["start_z"])
             self.lift_to(zp)
@@ -312,6 +370,8 @@ class FarmGenerator:
             pg = plan.purge[a]
             ycmd = pg["y"] + plan.offsets[a][1]
             self.g1(y=ycmd, f=12000)
+            if timed and ai > 0:
+                self.schedule_preheat(a, temp, pre_t, "standby_T%d" % a)
             out("M109 T%d S%s" % (a, _fmt(temp, 0)))
             # straight front prime line
             out("; FARM_PURGE tool=%d" % a)
@@ -328,12 +388,7 @@ class FarmGenerator:
             self.retract([a], self.retract_len)
             out("; FARM_PURGE_END")
             fan_state = None
-            nxt = H[ai + 1] if ai + 1 < len(H) else None
             for L in range(1, F + 1):
-                if lead and nxt is not None and L == max(1, F - lead + 1):
-                    out("; preheat next head while T%d prints layer %d" % (a, L))
-                    out("M104 T%d S%s" % (nxt, _fmt(temp, 0)))
-                    preheated.add(nxt)
                 for c in m.gap_events.get(L, []):
                     if c.kind == "fan":
                         self.set_fans([a], float(c.text.split()[1]))
@@ -408,4 +463,4 @@ class FarmGenerator:
 def generate(model, prof, plan, input_sha256="", profile_fp=""):
     g = FarmGenerator(model, prof, plan, input_sha256, profile_fp)
     text = g.run()
-    return text, dict(g.counts, lines=len(g.out.lines), sha256=hashlib.sha256(text.encode()).hexdigest())
+    return text, dict(g.counts, lines=len(g.out.lines), sha256=hashlib.sha256(text.encode()).hexdigest(), preheats=g.preheats)

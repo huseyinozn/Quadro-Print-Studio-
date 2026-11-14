@@ -101,8 +101,9 @@ class WebFlow(WebBase):
         st, html, _ = self.req("/")
         html = html.decode()
         self.assertEqual(st, 200)
-        for t in ("Farm Mode", "Copy Mode", "Dual Color Copy Mode", "Coming soon", "Available"):
+        for t in ("Farm Mode", "Copy Mode", "Dual Color Copy Mode", "Available", 'id="mode-dual"'):
             self.assertIn(t, html)
+        self.assertNotIn("Coming soon", html)
         self.assertNotIn("influencer", html.lower())
 
     def test_success_flow_download_matches_verified_file(self):
@@ -174,7 +175,8 @@ class WebExamplesAndMeshMarks(WebBase):
         self.assertEqual(ex["sharks-40"]["mode"], "Farm Mode")
         self.assertTrue(ex["orcacube"]["available"])
         self.assertEqual(ex["orcacube"]["mode_id"], "copy")
-        self.assertFalse(ex["fidgets-2c"]["available"])
+        self.assertTrue(ex["fidgets-2c"]["available"])
+        self.assertEqual(ex["fidgets-2c"]["mode_id"], "dual")
         self.assertNotIn("file", ex["sharks-40"])                # example source is never offered for download
         for e in ex.values():
             st, img, hdr = self.req(e["image"])
@@ -190,9 +192,26 @@ class WebExamplesAndMeshMarks(WebBase):
         self.assertEqual(r["layout"]["count"], 40)
         self.assertEqual(r["model"]["layers"], 83)
 
-    def test_coming_soon_example_refused(self):
+    def test_fidget_example_refused_with_preview_and_reasons(self):
+        # the example's two models are coloured differently (and the synthetic profile's
+        # offsets are inconsistent): refused, but the head/region/model preview is shown
         st, r = self.plan_example("fidgets-2c")
+        self.assertEqual(st, 200)
+        self.assertEqual(r["state"], "rejected")
+        codes = {p["code"] for p in r["problems"]}
+        self.assertIn("DUAL_NOT_COPYABLE", codes)
+        self.assertIn("PLAN_PAIR_Z_CONSISTENCY", codes)
+        L = r["layout"]
+        self.assertEqual(L["mode"], "dual")
+        self.assertEqual([(m["head"], m["model"], m["colour"]) for m in L["mapping"]],
+                         [(0, "left", 1), (1, "right", 1), (2, "left", 2), (3, "right", 2)])
+        self.assertTrue(L["region_marks"])
+        for Lk, per in L["regions"].items():
+            self.assertEqual(sorted(per), ["0", "1", "2", "3"])
+        st, _, _ = self.req("/api/generate/" + r["job_id"], b"", "application/octet-stream", "POST")
         self.assertEqual(st, 409)
+        st, _, _ = self.req("/api/download/" + r["job_id"])
+        self.assertEqual(st, 403)
 
     def test_marks_equal_planner_list(self):
         from quadro_studio.slicer import load_slice
@@ -229,10 +248,31 @@ class WebExamplesAndMeshMarks(WebBase):
         self.assertLess(max(p[0] for p in left["hull"]), min(p[0] for p in right["hull"]))   # T0 left, T1 right
         self.assertEqual(r["model"]["layers"], 225)
 
-    def test_dual_mode_refused(self):
+    def test_dual_mode_single_colour_model_refused(self):
         body, ct = multipart({"profile": ("p.zip", self.profile), "model": ("box.gcode", self.model), "mode": (None, "dual"), "count": (None, "2")})
         st, data, _ = self.req("/api/plan", body, ct)
-        self.assertEqual(st, 409)
+        r = json.loads(data)
+        self.assertEqual(r["state"], "rejected")
+        self.assertIn("DUAL_TOOLS", {p["code"] for p in r["problems"]})
+
+    def test_dual_mode_own_model_end_to_end(self):
+        import synth_dual
+        from test_dual import CONSISTENT
+        dual = synth_dual.dual_gcode(layers=10).encode()
+        prof = open(synth_profile.build(os.path.join(self.tmp, "dual_ok.zip"), offsets=CONSISTENT), "rb").read()
+        body, ct = multipart({"profile": ("p.zip", prof), "model": ("two.gcode", dual), "mode": (None, "dual"), "count": (None, "9")})
+        st, data, _ = self.req("/api/plan", body, ct)
+        r = json.loads(data)
+        self.assertEqual(r["state"], "planned", r.get("problems"))
+        self.assertEqual(r["inputs"]["count"], 2)
+        st, _, _ = self.req("/api/download/" + r["job_id"])
+        self.assertEqual(st, 403)                                  # nothing before verification
+        s = self.run_job(r["job_id"])
+        self.assertEqual(s["state"], "passed", s)
+        self.assertEqual(s["verify"]["region_layers_ok"], {"T0": "10/10", "T1": "10/10", "T2": "10/10", "T3": "10/10"})
+        st, data, _ = self.req(s["download_url"])
+        self.assertEqual(hashlib.sha256(data).hexdigest(), s["gcode_sha256"])
+        self.assertIn(b"Dual Color Copy Mode", data[:500])
 
     def test_copy_mode_own_model_end_to_end(self):
         body, ct = multipart({"profile": ("p.zip", self.profile), "model": ("box.gcode", self.model), "mode": (None, "copy"), "count": (None, "7")})

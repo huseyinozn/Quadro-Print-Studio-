@@ -113,3 +113,10 @@ a.download { display: block; text-align: center; text-decoration: none; backgrou
 
 .modepick { margin: 0 0 14px 0; }
 .modepick .dis { color: var(--muted); }
+.layer-pick { display: flex; gap: 6px; overflow-x: auto; margin: 4px 0 8px; }
+.layer-pick button { font: inherit; font-size: .85rem; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 999px; padding: 6px 12px; min-height: 36px; white-space: nowrap; cursor: pointer; }
+.layer-pick button[aria-selected=true] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.mapping table { width: 100%; border-collapse: collapse; font-size: .9rem; margin: 10px 0; }
+.mapping th, .mapping td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+.mapping .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; border: 1px solid var(--line); }
+.mapping .why { background: var(--bad-bg); color: var(--ink); border-radius: 10px; padding: 10px 12px; margin: 8px 0; font-size: .92rem; }

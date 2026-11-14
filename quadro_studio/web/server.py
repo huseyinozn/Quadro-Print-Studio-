@@ -40,6 +40,9 @@ from ..profile import load_profile, profile_checks
 from ..slicer import load_slice
 from ..plan import make_plan, LayoutOptions, suggest_count
 from ..generate import generate
+from ..dualslice import load_dual
+from ..dualplan import make_dual_plan, PAIR, PAIR_OF
+from ..dualgen import generate_dual
 from . import messages
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -53,9 +56,10 @@ EXAMPLES = [
     dict(id="orcacube", title="OrcaCube", mode="Copy Mode", mode_id="copy", available=True, count=2,
          file="orca_cube.gcode", image="/examples/orcacube.png",
          text="Two cubes at the same time: T0 prints the left one, T1 the right one. You only upload your printer profile."),
-    dict(id="fidgets-2c", title="Two-Color Fidgets", mode="Dual Color Copy Mode", mode_id="dual", available=False, count=None,
+    dict(id="fidgets-2c", title="Two-Color Fidgets", mode="Dual Color Copy Mode", mode_id="dual", available=True, count=2,
          file="two_color_fidget.gcode", image="/examples/fidgets.png",
-         text="Two two-colour fidgets at once: T0 and T1 print one colour on both models together, T2 and T3 the other colour."),
+         text="Two two-colour fidgets at once: T0 + T1 print colour 1 on both models together, then T2 + T3 colour 2. "
+              "You only upload your printer profile."),
 ]
 MAX_SLICE = 256 * 1024 * 1024
 MAX_PROFILE = 24 * 1024 * 1024
@@ -115,9 +119,9 @@ class App:
 
     # ---------------------------------------------------------------- plan
     def plan(self, slice_name, slice_bytes, profile_bytes, count, mode="farm"):
-        if mode not in ("farm", "copy"):
+        if mode not in ("farm", "copy", "dual"):
             raise ValueError("unknown mode")
-        if mode == "copy":
+        if mode in ("copy", "dual"):
             count = 2
         ss, ps = sha256_bytes(slice_bytes), sha256_bytes(profile_bytes)
         jid = sha256_bytes(("%s|%s|%d|%s|%s" % (ss, ps, count, mode, ENGINE)).encode())[:20]
@@ -135,6 +139,8 @@ class App:
             f.write(profile_bytes)
         job.inputs = dict(model=os.path.basename(slice_name or "model.gcode")[:120], model_sha256=ss, profile_sha256=ps,
                           count=count, mode=mode)
+        if mode == "dual":
+            return self._plan_dual(job, folder)
         diags = Diagnostics()
         result = dict(job_id=jid, inputs=job.inputs)
         try:
@@ -185,6 +191,45 @@ class App:
         job.layout = result
         return job, result
 
+    def _plan_dual(self, job, folder):
+        """Dual Color Copy Mode: the preview is built even when the job is refused,
+        so the user sees which head would print which region and why it stops."""
+        diags = Diagnostics()
+        result = dict(job_id=job.id, inputs=job.inputs)
+        try:
+            dual, d1 = load_dual(os.path.join(folder, "model.gcode"), Diagnostics(), strict=False)
+            diags.extend(d1)
+            prof, d2 = load_profile(os.path.join(folder, "profile.zip"))
+            diags.extend(d2)
+            profile_checks(prof, diags)
+        except StageError as e:
+            diags.extend(e.diags)
+            job.state = "rejected"
+            job.message = messages.headline(diags)
+            result.update(state=job.state, message=job.message, problems=messages.explain(diags), warnings=[])
+            job.layout = result
+            return job, result
+        plan, d3 = make_dual_plan(dual, prof)
+        diags.extend(d3)
+        m0 = dual.models[0]
+        result["model"] = dict(footprint_mm=dual.stats.get("footprint") or [round(m0.bbox_extrude[2] - m0.bbox_extrude[0], 2),
+                                                                         round(m0.bbox_extrude[3] - m0.bbox_extrude[1], 2)],
+                               layers=m0.layer_count, height_mm=round(m0.blocks[-1].z, 2),
+                               nozzle_temp=m0.nozzle_temp, bed_temp=m0.bed_temp)
+        if plan is not None:
+            result["model"]["footprint_mm"] = plan.slice_summary["footprint"]
+            result["layout"] = dual_layout_json(dual, prof, plan)
+        if plan is None or not diags.ok():
+            job.state = "rejected"
+            job.message = messages.headline(diags)
+            result.update(state="rejected", message=job.message, problems=messages.explain(diags), warnings=messages.warnings(diags))
+        else:
+            job.state = "planned"
+            job.message = "Layout checks passed. Generate to create and verify the file."
+            result.update(state="planned", message=job.message, warnings=messages.warnings(diags))
+        job.layout = result
+        return job, result
+
     # ---------------------------------------------------------------- generate + verify
     def start_generate(self, jid):
         job = self.jobs.get(jid)
@@ -210,12 +255,19 @@ class App:
         try:
             if os.path.exists(out):
                 os.remove(out)
-            model, _ = load_slice(os.path.join(folder, "model.gcode"))
             prof, _ = load_profile(os.path.join(folder, "profile.zip"))
-            plan, d = make_plan(model, prof, LayoutOptions(count=job.inputs["count"], preset="auto", mode=job.inputs["mode"]))
-            if plan is None or not d.ok():
-                raise RuntimeError("plan no longer valid")
-            text, info = generate(model, prof, plan, job.inputs["model_sha256"], prof.fingerprint)
+            if job.inputs["mode"] == "dual":
+                dual, _ = load_dual(os.path.join(folder, "model.gcode"), strict=True)
+                plan, d = make_dual_plan(dual, prof)
+                if plan is None or not d.ok():
+                    raise RuntimeError("plan no longer valid")
+                text, info = generate_dual(dual, prof, plan, job.inputs["model_sha256"], prof.fingerprint)
+            else:
+                model, _ = load_slice(os.path.join(folder, "model.gcode"))
+                plan, d = make_plan(model, prof, LayoutOptions(count=job.inputs["count"], preset="auto", mode=job.inputs["mode"]))
+                if plan is None or not d.ok():
+                    raise RuntimeError("plan no longer valid")
+                text, info = generate(model, prof, plan, job.inputs["model_sha256"], prof.fingerprint)
             with open(out, "w") as f:
                 f.write(text)
             if self.post_generate_hook:
@@ -298,6 +350,82 @@ def layout_json(model, prof, plan):
                           for p in plan.mesh_deviating_points],
         offsets={"T%d" % t: list(plan.offsets[t]) for t in range(4)},
         mesh_affected=sorted(effects),
+        checks=[dict(name=c["name"], ok=c["ok"], detail=c["detail"]) for c in plan.checks],
+    )
+
+
+def _path_d(segs, step=0.1):
+    """SVG path data of extrusion segments (consecutive segments joined)."""
+    out, last = [], None
+    q = lambda v: round(v / step) * step
+    for x0, y0, x1, y1 in segs:
+        a, b = (q(x0), q(y0)), (q(x1), q(y1))
+        if last is None or abs(last[0] - a[0]) > 1e-9 or abs(last[1] - a[1]) > 1e-9:
+            out.append("M%.1f %.1f" % (a[0], 300 - a[1]))
+        if b != last:
+            out.append("L%.1f %.1f" % (b[0], 300 - b[1]))
+        last = b
+    return "".join(out)
+
+
+def dual_layout_json(dual, prof, plan):
+    """Preview data for Dual Color Copy Mode: for a few layers, the region every head
+    prints on which model (each head's OWN slice region, placed where it is printed),
+    plus towers, prime lines and the reasons a job is refused."""
+    F = plan.foundation_layers
+    n = len(plan.layer_z)
+    slot = plan.slots[0]
+    tr = {0: (0.0, 0.0), 2: (0.0, 0.0), 1: tuple(dual.translation), 3: tuple(dual.translation)}
+    diffs = [d["layer"] for k in ("colour1", "colour2") for d in (dual.region_differences.get(k) or [])]
+    layers = sorted({1, F, F + 1, (n + 1) // 2, n} | ({diffs[0]} if diffs else set()))
+    layers = [L for L in layers if 1 <= L <= n]
+
+    def phys(t, x, y):
+        return plan.phys_xy(t, x - tr[t][0] + slot.dx, y - tr[t][1] + slot.dy)
+
+    regions = {}
+    for L in layers:
+        per = {}
+        for t in range(4):
+            segs = []
+            for mv in dual.models[t].blocks[L - 1].moves():
+                if mv.kind == "extrude":
+                    a, b = phys(t, mv.x0, mv.y0), phys(t, mv.x, mv.y)
+                    segs.append((a[0], a[1], b[0], b[1]))
+            per[str(t)] = _path_d(segs)
+        regions[str(L)] = per
+    marks = []
+    for k, (a, b) in (("colour1", (0, 1)), ("colour2", (2, 3))):
+        for d in (dual.region_differences.get(k) or [])[:1]:
+            bb = d.get("area_left_model_xy")
+            if bb:
+                for t in (a, b):
+                    p0, p1 = phys(0, bb[0], bb[1]), phys(0, bb[2], bb[3])
+                    if t in (1, 3):
+                        p0, p1 = (p0[0] + plan.spacing, p0[1]), (p1[0] + plan.spacing, p1[1])
+                    marks.append(dict(head=t, colour=k, first_layer=d["layer"], rect=[round(p0[0], 2), round(p0[1], 2), round(p1[0], 2), round(p1[1], 2)],
+                                      layers=[x["layer"] for x in dual.region_differences[k]][:40]))
+    m = prof.mesh
+    hulls = {t: plan.footprints["%d/0" % t] for t in range(4)}
+    effects = {}
+    for a in plan.affected_by_outliers:
+        effects.setdefault(str(a["tool"]), []).append(dict(point=a["point"], point_z=a["point_z"], first_layer_mm=a["first_layer_dz_max"],
+                                                          layer_end_top_mm=a["foundation_top_dz_max"]))
+    return dict(
+        bed=[0, 0, 300, 300], mesh_area=[m.min_x, m.min_y, m.max_x, m.max_y], mode="dual", heads=[0, 1, 2, 3], parked_heads=[],
+        count=2, foundation_layers=F, total_layers=n, preview_layers=layers, regions=regions,
+        colours={str(t): dual.colours[t] for t in range(4)},
+        mapping=[dict(head=t, model="left" if t in (0, 2) else "right", colour=1 if t in (0, 1) else 2,
+                      pair="T0 + T1" if t in (0, 1) else "T2 + T3") for t in range(4)],
+        hulls={str(t): hulls[t] for t in range(4)},
+        towers={str(t): [[round(x, 2), round(y, 2)] for x, y in plan.tower_squares[t]] for t in range(4)},
+        purge=[dict(head=t, x0=plan.purge[t]["x0"], x1=plan.purge[t]["x1"], y=plan.purge[t]["y"]) for t in range(4)],
+        purge_width=plan.purge["width_est"], region_marks=marks,
+        pair_z=plan.pair_z, pair_y=plan.pair_y, spacing=round(plan.spacing, 2),
+        deviating_points=[dict(x=p["x"], y=p["y"], z=p["z"], deviation=p["deviation"], neighbour_median=p["neighbour_median"])
+                          for p in plan.mesh_deviating_points],
+        mesh_effects=effects, mesh_affected=sorted(effects),
+        offsets={"T%d" % t: list(plan.offsets[t]) for t in range(4)},
         checks=[dict(name=c["name"], ok=c["ok"], detail=c["detail"]) for c in plan.checks],
     )
 
@@ -412,8 +540,8 @@ class Handler(BaseHTTPRequestHandler):
                 mode = (f.get("mode", (None, b"farm"))[1] or b"farm").decode().strip()
                 if ex_id:
                     mode = ex["mode_id"]
-                if mode not in ("farm", "copy"):
-                    return self.send_json(dict(error="This mode is coming soon."), 409)
+                if mode not in ("farm", "copy", "dual"):
+                    return self.send_json(dict(error="Unknown mode."), 409)
                 job, result = self.app.plan(mname, mbytes, pbytes, count, mode)
                 return self.send_json(result)
             if path.startswith("/api/generate/"):

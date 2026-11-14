@@ -32,9 +32,9 @@
         <div class="mode-h"><h3>Copy Mode</h3><span class="tag ok">Available</span></div>
         <p>Two copies at once: T0 prints the left one, T1 the right one; T2 and T3 stay parked.</p>
       </article>
-      <article class="mode off" aria-disabled="true">
-        <div class="mode-h"><h3>Dual Color Copy Mode</h3><span class="tag soon">Coming soon</span></div>
-        <p>Two-colour models, duplicated across heads.</p>
+      <article class="mode on" data-mode="dual">
+        <div class="mode-h"><h3>Dual Color Copy Mode</h3><span class="tag ok">Available</span></div>
+        <p>Two two-colour models at once: T0 + T1 print colour 1 on both, then T2 + T3 print colour 2.</p>
       </article>
     </div>
   </section>
@@ -51,7 +51,7 @@
     <div class="source modepick" role="radiogroup" aria-label="Mode">
       <label><input type="radio" name="mode" value="farm" id="mode-farm" checked> Farm Mode</label>
       <label><input type="radio" name="mode" value="copy" id="mode-copy"> Copy Mode</label>
-      <label class="dis"><input type="radio" name="mode" value="dual" disabled> Dual Color Copy Mode <span class="tag soon">Coming soon</span></label>
+      <label><input type="radio" name="mode" value="dual" id="mode-dual"> Dual Color Copy Mode</label>
     </div>
     <ol class="steps">
       <li>
@@ -70,7 +70,7 @@
           <div><b id="chosen-title">40 Sharks</b><br><span class="help-in">The sliced model is included. Nothing to upload here.</span></div>
         </div>
         <div id="upload-box">
-          <p class="help">G-code of one single-colour model from Co Print Slicer, sliced once for T0.</p>
+          <p class="help" id="upload-help">G-code of one single-colour model from Co Print Slicer, sliced once for T0.</p>
           <label for="model" class="sr">Sliced model G-code</label>
           <input type="file" id="model" accept=".gcode,.gco,.txt">
         </div>
@@ -79,6 +79,7 @@
         <label for="count" class="step-l"><span class="n">3</span>Copies</label>
         <p class="help" id="copies-help">A multiple of 4: each of the four heads prints the same number of copies.</p>
         <p class="help hidden" id="copy-fixed"><b>2 copies</b> — T0 prints the left copy, T1 the right copy. T2 and T3 stay parked for the whole print.</p>
+        <p class="help hidden" id="dual-fixed"><b>2 two-colour copies</b> — left model: T0 colour 1 + T2 colour 2; right model: T1 colour 1 + T3 colour 2.</p>
         <div class="stepper" id="stepper">
           <button type="button" id="minus" aria-label="Fewer copies">−</button>
           <input type="number" id="count" value="40" min="4" max="400" step="4" inputmode="numeric">
@@ -94,9 +95,11 @@
     <div class="row-h"><h2 id="layout-h">Layout</h2><span class="sub" id="layout-sub"></span></div>
     <div class="phases" role="tablist" id="phases"></div>
     <p class="phase-note" id="phase-note"></p>
+    <div class="layer-pick hidden" id="layer-pick" role="tablist" aria-label="Preview layer"></div>
     <div class="bed-wrap"><svg id="bed" role="img" aria-label="Bed layout preview"></svg></div>
     <div class="legend" id="legend"></div>
     <div class="copy-info" id="copy-info" aria-live="polite">Tap a copy to see its details.</div>
+    <div id="mapping" class="mapping hidden"></div>
     <ul class="warn" id="warnings"></ul>
     <details class="checks"><summary>Layout checks</summary><ul id="checklist"></ul></details>
     <button type="button" class="primary" id="generate">Generate and verify</button>
@@ -121,12 +124,13 @@
     <h2>Good to know</h2>
     <ul>
       <li>The layout is calculated from your model's size and your printer's measured bed. Bigger models fit fewer copies; models are never scaled.</li>
-      <li>Layers 1–5 are printed by each head on its own, so every head starts exactly on the measured bed. From layer 6 on, the heads print together.</li>
+      <li>The first layers are printed by each head on its own, so every head starts exactly on the measured bed (Farm and Copy: layers 1–5, Dual Color: layers 1–3). After that the heads print together.</li>
+      <li>Dual Color Copy Mode needs a four-tool slice with two identically coloured models, and tool offsets that let both pairs print both models at one shared height and Y. If they don't, the layout shows why and no file is made.</li>
       <li>Every file is checked by a separate verification step before it can be downloaded. Passing these software checks does not mean the file was tested on your printer.</li>
     </ul>
   </section>
 </main>
-<footer class="wrap foot">Quadro Print Studio · Farm Mode · Copy Mode</footer>
+<footer class="wrap foot">Quadro Print Studio · Farm Mode · Copy Mode · Dual Color Copy Mode</footer>
 <script src="/app.js"></script>
 </body>
 </html>

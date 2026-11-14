@@ -39,6 +39,16 @@ PLAIN = {
     "PLAN_NOZZLE": "The model was sliced for a different nozzle size than the printer has.",
     "PLAN_FILAMENT": "The model was sliced for a different filament diameter.",
     "PLAN_TEMP": "The model's temperature is outside the printer's limits.",
+    "DUAL_NOT_COPYABLE": "The two models are not coloured the same way. In Dual Color Copy Mode the right model copies the left model's moves, so both models must have identical colour regions on every layer.",
+    "DUAL_TOOLS": "This file is not a four-tool, two-colour slice with two models (left: T0 and T2, right: T1 and T3).",
+    "DUAL_MISSING_REGION": "One of the four tools has nothing to print on some layers; every head needs its colour region on every layer.",
+    "DUAL_LAYERS": "The four tools of this slice do not share the same layers.",
+    "PLAN_PAIR_Z_CONSISTENCY": "The heights of the four heads (Z tool offsets) do not allow both models to get matching colour layers: each pair prints both models at one shared height.",
+    "PLAN_PAIR_Y_REGISTRATION": "The Y tool offsets do not allow the two colours to line up on both models: each pair prints both models at one shared Y.",
+    "PLAN_TOWER_CLEARANCE": "The wipe towers would be too close to the models.",
+    "PLAN_PAIR_PARKS": "A printing pair would come too close to the parked heads.",
+    "PLAN_PAIR_A_SPACING": "T0 and T1 would be too close together while printing together.",
+    "PLAN_PAIR_B_SPACING": "T2 and T3 would be too close together while printing together.",
 }
 
 VERIFY_PLAIN = {
@@ -79,6 +89,15 @@ VERIFY_PLAIN = {
     "OUT_UNKNOWN_COMMAND": "The file contains a command outside the verified set.",
     "EXTRUDE_CROSS_SECTION": "An extrusion exceeds the printer's extrusion limit.",
     "EXTRUDE_ONLY_DISTANCE": "A retraction or prime exceeds the printer's limit.",
+    "OUT_PARKED_EXTRUDE": "A parked head's extruder pushes filament.",
+    "DUAL_REGION": "A head does not print exactly its own colour region on its own model on every layer.",
+    "DUAL_REGISTRATION": "The two colours of a model do not line up.",
+    "DUAL_PAIR": "The wrong heads print together (expected T0 + T1, then T2 + T3).",
+    "DUAL_TOWER": "A wipe tower is missing, misplaced or printed at the wrong speed.",
+    "DUAL_PRIME": "A head's prime line is missing or not directly before its first print.",
+    "TOWER_THICKNESS": "A wipe tower layer has the wrong thickness.",
+    "TOWER_BASE": "A wipe tower layer has nothing below it.",
+    "CARRIAGE_DETOUR": "A waiting head is moved towards the printing heads and back (unnecessary carriage travel).",
 }
 
 
@@ -139,4 +158,7 @@ def verify_summary(res, exit_code):
         layers_per_copy=sorted((res.get("layers_per_copy") or {}).values()),
         synchronized_from_layer=res.get("synchronized_from_layer"),
         parked_heads=(res.get("parked_heads") or {}).get("heads"),
-        parked_heads_stayed=(res.get("parked_heads") or {}).get("stayed_parked"))
+        parked_heads_stayed=(res.get("parked_heads") or {}).get("stayed_parked"),
+        mode=res.get("mode"), region_layers_ok=res.get("dual_region_layers_ok"),
+        registration_mm=res.get("dual_registration_mm"), min_gap_models_mm=res.get("min_gap_between_models_mm"),
+        tower_gap_mm=res.get("tower_min_gap_to_models_mm"))

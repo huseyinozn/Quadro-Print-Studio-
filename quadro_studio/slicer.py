@@ -668,6 +668,8 @@ def load_slice(path, diags: Diagnostics | None = None):
         "z_hop": _first(cfg.get("z_hop", "0")),
         "printable_area": cfg.get("printable_area", ""),
         "deretraction_speed": _first(cfg.get("deretraction_speed", "0")),
+        "preheat_time": _first(cfg.get("preheat_time", "0")),
+        "wipe_distance": _first(cfg.get("wipe_distance", "0")),
     }
     model = SliceModel(path=path, generator=generator, config=cfgp, start_params=start_params,
                        initial_retract=initial_retract, blocks=blocks, gap_events=gap_events, end_events=end_events,
