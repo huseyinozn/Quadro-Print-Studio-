@@ -304,3 +304,133 @@ def _ranges(v):
         else:
             out.append([x, x])
     return ["%d" % a if a == b else "%d-%d" % (a, b) for a, b in out]
+
+
+# ======================================================================================
+# Y residual at the real colour borders
+# ======================================================================================
+def analyse_y_boundary(dual, plan, res=0.05, focus_layers=(14,), max_items=12, layers=None):
+    """Effect of the colour-to-colour Y shift on THIS model's colour borders.
+
+    For each model and layer the two colours' bead footprints (half line width
+    around every extrusion path) are rasterised twice on a ``res`` grid: as
+    sliced (nominal, colours exactly registered) and as planned (colour 2
+    shifted by the pair Y residual against colour 1). Reported per layer:
+
+    * new_gap: area covered nominally but by neither colour as planned, next to
+      both colours (a gap opening at the colour border), with the widest gap
+      measured along Y;
+    * new_overlap: area covered by both colours as planned but not nominally
+      (extra double deposit at the border), widest along Y;
+    * outline_step: colour-2 area moved outside the nominal model outline or
+      left uncovered at the outline (the outer surface steps by the shift).
+    """
+    src = {"left": (dual.models[0], dual.models[2], 0, 2), "right": (dual.models[0], dual.models[2], 1, 3)}
+    m0, m2 = dual.models[0], dual.models[2]
+    bx0 = min(m0.bbox_motion[0], m2.bbox_motion[0]) - 2
+    by0 = min(m0.bbox_motion[1], m2.bbox_motion[1]) - 2
+    bx1 = max(m0.bbox_motion[2], m2.bbox_motion[2]) + 2
+    by1 = max(m0.bbox_motion[3], m2.bbox_motion[3]) + 2
+    gx, gy = int((bx1 - bx0) / res) + 2, int((by1 - by0) / res) + 2
+    slot = plan.slots[0]
+    kern = {}
+
+    def raster(model, L, dy):
+        g = np.zeros((gx, gy), dtype=bool)
+        ext = [m for m in model.blocks[L - 1].moves() if m.kind == "extrude"]
+        if not ext:
+            return g
+        xs, ys, k = _samples([(m.x0, m.y0, m.x, m.y) for m in ext], res * 0.5)
+        w = np.round(np.array([m.width for m in ext])[k] / 2.0, 3)
+        ci = np.rint((xs - bx0) / res).astype(np.int32)
+        cj = np.rint((ys + dy - by0) / res).astype(np.int32)
+        for r in np.unique(w):
+            if r not in kern:
+                rr = int(math.ceil(r / res))
+                kern[r] = np.array([(i, j) for i in range(-rr, rr + 1) for j in range(-rr, rr + 1)
+                                    if math.hypot(i, j) * res <= r + 1e-9], dtype=np.int32)
+            K = kern[r]
+            sel = w == r
+            g[(ci[sel][:, None] + K[None, :, 0]).ravel(), (cj[sel][:, None] + K[None, :, 1]).ravel()] = True
+        return g
+
+    def dil(g, n):
+        out = g.copy()
+        for _ in range(n):
+            o = out.copy()
+            o[1:, :] |= out[:-1, :]; o[:-1, :] |= out[1:, :]; o[:, 1:] |= out[:, :-1]; o[:, :-1] |= out[:, 1:]
+            out = o
+        return out
+
+    def widest_y(mask):
+        """Longest run of True along Y (mm) and the column/row where it starts."""
+        best, where = 0, None
+        cols = np.nonzero(mask.any(axis=1))[0]
+        for i in cols:
+            col = mask[i]
+            d = np.diff(np.concatenate(([0], col.astype(np.int8), [0])))
+            st, en = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+            if len(st):
+                L = (en - st).max()
+                if L > best:
+                    best = int(L); j = int(st[np.argmax(en - st)])
+                    where = (i, j + best // 2)
+        return best * res, where
+
+    report = dict(raster_mm=res, sides={})
+    for side, (ma, mb, ha, hb) in src.items():
+        dy = plan.phys_xy(hb, 0.0, 0.0)[1] - plan.phys_xy(ha, 0.0, 0.0)[1]
+        dx = (plan.phys_xy(hb, 0.0, 0.0)[0] - plan.phys_xy(ha, 0.0, 0.0)[0])
+        per = []
+        tot = dict(new_gap_mm2=0.0, new_overlap_mm2=0.0, outline_step_mm2=0.0, nominal_overlap_mm2=0.0,
+                   widest_gap_mm=0.0, widest_gap_at=None, widest_overlap_mm=0.0, widest_overlap_at=None)
+        near = max(1, int(round(0.5 / res)))
+        for L in (layers or range(1, len(plan.layer_z) + 1)):
+            A = raster(ma, L, 0.0)
+            Bn = raster(mb, L, 0.0)
+            Bs = raster(mb, L, dy)
+            if not A.any() or not Bn.any():
+                continue
+            nom = A | Bn
+            now = A | Bs
+            border = dil(A, near) & dil(Bn, near)            # within 0.5 mm of both colours (nominal)
+            lost = nom & ~now
+            gap = lost & border
+            # outer surface: cells outside the model along rows/columns (first/last deposit per line)
+            ext = np.zeros_like(nom)
+            for arr, axis in ((nom, 0), (nom, 1)):
+                c = np.cumsum(arr, axis=axis) == 0
+                c2 = np.flip(np.cumsum(np.flip(arr, axis=axis), axis=axis) == 0, axis=axis)
+                ext |= c | c2
+            outer = dil(ext, near)
+            outline = ((lost | (Bs & ~nom)) & outer) & ~gap
+            ov_new = (A & Bs) & ~(A & Bn)
+            ov_nom = A & Bn
+            ga, oa = gap.sum() * res * res, ov_new.sum() * res * res
+            gw, gwhere = widest_y(gap)
+            ow, owhere = widest_y(ov_new)
+
+            def phys(cell, head):
+                if cell is None:
+                    return None
+                sx, sy = bx0 + cell[0] * res, by0 + cell[1] * res
+                px, py = plan.phys_xy(head, sx + slot.dx, sy + slot.dy)
+                return [round(float(px), 2), round(float(py), 2)]
+            row = dict(layer=L, new_gap_mm2=round(float(ga), 3), widest_gap_mm=round(float(gw), 3), widest_gap_at=phys(gwhere, ha),
+                       new_overlap_mm2=round(float(oa), 3), widest_overlap_mm=round(float(ow), 3), widest_overlap_at=phys(owhere, ha),
+                       outline_step_mm2=round(float(outline.sum() * res * res), 3),
+                       nominal_overlap_mm2=round(float(ov_nom.sum() * res * res), 3),
+                       colour1_mm2=round(float(A.sum() * res * res), 2), colour2_mm2=round(float(Bn.sum() * res * res), 2))
+            per.append(row)
+            tot["new_gap_mm2"] += ga; tot["new_overlap_mm2"] += oa; tot["outline_step_mm2"] += row["outline_step_mm2"]
+            tot["nominal_overlap_mm2"] += row["nominal_overlap_mm2"]
+            if gw > tot["widest_gap_mm"]:
+                tot["widest_gap_mm"], tot["widest_gap_at"] = gw, dict(layer=L, xy=row["widest_gap_at"])
+            if ow > tot["widest_overlap_mm"]:
+                tot["widest_overlap_mm"], tot["widest_overlap_at"] = ow, dict(layer=L, xy=row["widest_overlap_at"])
+        for k in ("new_gap_mm2", "new_overlap_mm2", "outline_step_mm2", "nominal_overlap_mm2", "widest_gap_mm", "widest_overlap_mm"):
+            tot[k] = round(float(tot[k]), 3)
+        report["sides"][side] = dict(colour1_head="T%d" % ha, colour2_head="T%d" % hb, colour2_shift_vs_colour1_mm=[round(dx, 4), round(dy, 4)],
+                                     totals=tot, focus=[r for r in per if r["layer"] in focus_layers],
+                                     worst_layers=sorted(per, key=lambda r: -(r["new_gap_mm2"] + r["new_overlap_mm2"]))[:max_items])
+    return report

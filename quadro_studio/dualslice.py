@@ -440,8 +440,44 @@ def load_dual(path, diags=None, strict=True, right_from_left=False):
         os.rmdir(tmp)
     if not diags.ok():
         raise StageError(diags)
-    ra, bad_a = compare_regions(models[0], models[1], diags, "colour 1 (T0 left / T1 right)")
-    rb, bad_b = compare_regions(models[2], models[3], diags, "colour 2 (T2 left / T3 right)")
+    # ---- which slice tool is on which model, and which right region belongs to which left one.
+    # Physical heads are fixed: T0 left colour 1, T1 right colour 1 (COPY of T0), T2 left
+    # colour 2, T3 right colour 2 (COPY of T2). The slice may use another tool numbering
+    # (e.g. left T0/T1, right T2/T3); the right counterpart of each left region is found by
+    # geometry (same deposited area translated by one vector on every layer), never by number.
+    cx = {t: 0.5 * (models[t].bbox_extrude[0] + models[t].bbox_extrude[2]) for t in range(4)}
+    by_x = sorted(range(4), key=lambda t: cx[t])
+    left, right = sorted(by_x[:2]), sorted(by_x[2:])
+    results = {}
+    if left == [0, 2] and right == [1, 3]:
+        tool_map = {0: 0, 1: 1, 2: 2, 3: 3}
+    else:
+        tool_map = None
+        for r0, r1 in ((right[0], right[1]), (right[1], right[0])):
+            d_a, d_b = Diagnostics(), Diagnostics()
+            ca = compare_regions(models[left[0]], models[r0], d_a, "x")
+            if ca[0] is None:
+                continue
+            cb = compare_regions(models[left[1]], models[r1], d_b, "x")
+            results = {(left[0], r0): ca, (left[1], r1): cb}
+            tool_map = {0: left[0], 1: r0, 2: left[1], 3: r1}
+            break
+        if tool_map is None:
+            tool_map = {0: left[0], 1: right[0], 2: left[1], 3: right[1]}
+    slice_models = models
+    models = {p: slice_models[s_] for p, s_ in tool_map.items()}
+    lab = {p: "slice T%d" % tool_map[p] for p in range(4)}
+
+    def cmp(a, b, label):
+        key = (tool_map[a], tool_map[b])
+        if key in results:
+            r, bad = results[key]
+            if r is None:
+                compare_regions(models[a], models[b], diags, label)      # re-run to record the error with its label
+            return r, bad
+        return compare_regions(models[a], models[b], diags, label)
+    ra, bad_a = cmp(0, 1, "colour 1 (%s left / %s right)" % (lab[0], lab[1]))
+    rb, bad_b = cmp(2, 3, "colour 2 (%s left / %s right)" % (lab[2], lab[3]))
     region_differences = dict(colour1=bad_a, colour2=bad_b)
     if not diags.ok():
         if strict:
@@ -460,7 +496,7 @@ def load_dual(path, diags=None, strict=True, right_from_left=False):
             diags.error("DUAL_LAYERS", "T%d layer heights differ from T0" % t)
     # both colours of the left model must share one slice frame and not overlap in the same layer
     colours = (cfg.get("filament_colour", "") or "").split(";")
-    colours = {t: (colours[t] if t < len(colours) and colours[t] else "#888888") for t in range(4)}
+    colours = {p: (colours[tool_map[p]] if tool_map[p] < len(colours) and colours[tool_map[p]] else "#888888") for p in range(4)}
     try:
         preheat = float(str(cfg.get("preheat_time", "0")).split(",")[0])
     except ValueError:
@@ -472,9 +508,11 @@ def load_dual(path, diags=None, strict=True, right_from_left=False):
     if not diags.ok() and strict:
         raise StageError(diags)
     stats = dict(layers=len(zs), moves={t: models[t].stats["block_moves"] for t in range(4)},
+                 slice_tool_for_head={"T%d" % p: "T%d" % tool_map[p] for p in range(4)},
                  copy_translation=[round(ra[0][0], 4), round(ra[0][1], 4)], copy_max_dev=max(ra[1], rb[1]))
     ds = DualSlice(path, models, colours, preheat, delta, ra[0], cfg, sp["order"], stats)
     ds.region_differences = region_differences
+    ds.tool_map = tool_map
     ds.right_replaced = None
     ds.right_source = "slice"
     return ds, diags

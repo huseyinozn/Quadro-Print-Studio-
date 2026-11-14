@@ -186,9 +186,16 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
               "Colour mapping: left T0 = colour 1, T2 = colour 2; right T1 = copy of T0's regions, T3 = copy of T2's regions "
               "(built-in example: the slice's own right-model painting differed on %d layers and is not used)." % len(lay))
     else:
-        plan.colour_mapping = dict(source="slice", right="the slice's right model (verified equal to the left model's regions)")
+        tm = getattr(dual, "tool_map", {0: 0, 1: 1, 2: 2, 3: 3})
+        plan.colour_mapping = dict(source="slice", right="the slice's right model (verified equal to the left model's regions)",
+                                   slice_tool_for_head={"T%d" % h: "T%d" % tm[h] for h in range(4)},
+                                   slice_colours={"T%d" % h: dual.colours[h] for h in range(4)})
+        renum = "" if tm == {0: 0, 1: 1, 2: 2, 3: 3} else (
+            " Slice tools mapped by geometry: head T0 = slice T%d (left), T1 = slice T%d (right), T2 = slice T%d (left), "
+            "T3 = slice T%d (right)." % (tm[0], tm[1], tm[2], tm[3]))
         check("colour_mapping", True, "Colour mapping: left T0 = colour 1, T2 = colour 2; right T1 = colour 1, T3 = colour 2; "
-                                      "the right model's regions match the left model's on every layer.")
+                                      "the right model's regions match the left model's on every layer (same area, one "
+                                      "translation %.3f, %.3f mm)." % tuple(dual.translation) + renum)
 
     # ---- pair consistency (the reason a profile may be refused) ---------------------------
     a_z, b_z = offs[2][2] - offs[0][2], offs[3][2] - offs[1][2]

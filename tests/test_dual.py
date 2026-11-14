@@ -181,6 +181,29 @@ class DualMode(unittest.TestCase):
         with self.assertRaises(StageError):            # the user's own file is never silently changed
             load_dual(p)
 
+    def test_renumbered_slice_mapped_by_geometry(self):
+        # slice with left model T0/T1 and right model T2/T3: right counterparts found by geometry,
+        # physical pairs stay T0+T1 (colour 1) then T2+T3 (colour 2)
+        p = synth_dual.write(os.path.join(self.tmp, "renum.gcode"), layers=LAYERS, renumber=True)
+        ds, _ = load_dual(p)
+        self.assertEqual(ds.tool_map, {0: 0, 1: 2, 2: 1, 3: 3})
+        plan, d = make_dual_plan(ds, self.prof)
+        self.assertTrue(d.ok(), d.render())
+        self.assertIn("head T0 = slice T0 (left), T1 = slice T2 (right)", next(c for c in plan.checks if c["name"] == "colour_mapping")["detail"])
+        text, _ = generate_dual(ds, self.prof, plan)
+        out = os.path.join(self.tmp, "renum_out.gcode")
+        with open(out, "w") as f:
+            f.write(text)
+        res, sim = verify_dual(self.prof, ds.models, out, plan.foundation_layers)
+        self.assertTrue(res["passed"], res["issues"][:4])
+        self.assertEqual([vs["moving"] for vs in sim.visit_states if vs["layer"] == 5], [[0, 1], [2, 3]])
+
+    def test_renumbered_slice_with_different_right_painting_refused(self):
+        p = synth_dual.write(os.path.join(self.tmp, "renum_bad.gcode"), layers=LAYERS, renumber=True, differ_layer=5, right_patch=True)
+        with self.assertRaises(StageError) as cm:
+            load_dual(p)
+        self.assertIn("DUAL_NOT_COPYABLE", cm.exception.diags.render())
+
     def test_forced_inconsistent_output_fails_verification(self):
         plan, _ = make_dual_plan(self.dual, self.bad_prof)
         text, _ = generate_dual(self.dual, self.bad_prof, plan)

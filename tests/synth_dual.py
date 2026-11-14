@@ -31,7 +31,9 @@ def region(tool, L, x0, y0, w, h, dx):
 
 
 def dual_gcode(size=(24.0, 14.0), layers=12, center=(110.0, 150.0), dx=80.0, temp=215, bed=55,
-               differ_layer=None, right_patch=False):
+               differ_layer=None, right_patch=False, renumber=False):
+    """renumber=True writes the slice with left model T0/T1 and right model T2/T3
+    (slice tool -> physical head: T0->T0, T1->T2, T2->T1, T3->T3)."""
     w, h = size
     x0, y0 = center[0] - w / 2, center[1] - h / 2
     ea = math.pi * (1.75 / 2) ** 2
@@ -59,8 +61,9 @@ def dual_gcode(size=(24.0, 14.0), layers=12, center=(110.0, 150.0), dx=80.0, tem
                         "G1 X50.0 E0.6 F1980", "G1 Y231.0 E0.03", "G1 X30.0 E0.6", "G1 E-.4 F3000", "G4 S0", "G92 E0",
                         "; CP TOOLCHANGE END"]
                 cur = t
-            rx, ry, rw, rh = region(t, L, x0, y0, w, h, dx)
-            if right_patch and t == 1 and L == differ_layer:
+            hd = {0: 0, 1: 2, 2: 1, 3: 3}[t] if renumber else t
+            rx, ry, rw, rh = region(hd, L, x0, y0, w, h, dx)
+            if right_patch and hd == 1 and L == differ_layer:
                 rw *= 0.6                                  # the right model's colour-1 region differs on this layer
             out.append("; printing object box id:0 copy 0")
             out += ["G1 X%.3f Y%.3f Z%.3f F18000" % (rx, ry, z + 0.4), "G1 Z%.3f" % z, "G1 E.4 F3000",
