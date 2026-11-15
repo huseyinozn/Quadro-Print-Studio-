@@ -150,3 +150,14 @@ tools/          e2e_web.js (browser end-to-end, Playwright), serve_with_fault.py
                 run_acceptance.py, audit_run.py, write_report.py, build_bundle.py,
                 historical_e_check.py (test-only; reads historical private assets given on the command line)
 ```
+
+## Public static site (runs in the browser)
+
+`tools/build_site.py` builds a static site in which the same planner, generator and independent
+verifier run in the visitor's browser (Pyodide + numpy, two separate Web Workers: one plans and
+generates, the other only verifies). Uploaded files never leave the browser. The verified G-code
+is offered as a ZIP (the hosting viewer saves .zip, not .gcode). The site contains only the code
+and the public example slices; no printer profile, mesh or reference print.
+
+    python3 tools/build_site.py --pyodide <pyodide 0.26.4 package dir> \
+        --numpy <numpy-1.26.4-cp312-cp312-pyodide_2024_0_wasm32.whl> --out <dir>

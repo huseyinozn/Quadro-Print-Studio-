@@ -570,6 +570,7 @@
         </div>
         ${(v.warnings || []).length ? `<ul class="warn" id="result-warnings">${v.warnings.map(w => `<li>${escapeHtml(w.text)} (${w.count}×)<small>${escapeHtml(w.detail)}</small></li>`).join("")}</ul>` : ""}
         <a class="download" id="download" href="${s.download_url}" download="${escapeHtml(s.filename)}">Download G-code</a>
+        <p class="fine" id="dl-note" role="status"></p>
         <p class="fine">These are software checks of the generated file. It has not been tested on your printer. Watch the first layers of each head.</p>
         <p class="fine hash">File ${escapeHtml(s.filename)} · SHA-256 ${s.gcode_sha256}</p>`;
     } else if (s.state === "passed") {
@@ -589,6 +590,7 @@
           ${v.parked_heads && v.parked_heads.length ? `<span>${v.parked_heads.join(", ")} stayed parked all print</span><b>${v.parked_heads_stayed ? "yes" : "no"}</b>` : ""}
         </div>
         <a class="download" id="download" href="${s.download_url}" download="${escapeHtml(s.filename)}">Download G-code</a>
+        <p class="fine" id="dl-note" role="status"></p>
         <p class="fine">These are software checks of the generated file. It has not been tested on your printer. Watch the first layers of each head.</p>
         <p class="fine hash">File ${escapeHtml(s.filename)} · SHA-256 ${s.gcode_sha256}</p>`;
     } else {
