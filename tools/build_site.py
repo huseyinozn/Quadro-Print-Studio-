@@ -36,6 +36,8 @@ def main():
     ap.add_argument("--pyodide", required=True)
     ap.add_argument("--numpy", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--pages", action="store_true",
+                    help="standalone static host (GitHub Pages): index.html is a full document")
     a = ap.parse_args()
     out = os.path.abspath(a.out)
     if os.path.exists(out):
@@ -87,6 +89,11 @@ def main():
             "<script>\nwindow.QPS_READY.then(() => { const b = document.getElementById('boot'); if (b) b.textContent = 'Converter ready.'; })"
             ".catch((e) => { const b = document.getElementById('boot'); if (b) b.textContent = 'The converter could not start in this browser: ' + e.message; });\n"
             "</script>\n" % (css, body, open(os.path.join(ROOT, "site", "local_api.js"), encoding="utf-8").read(), app))
+    if a.pages:
+        page = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+                '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">\n'
+                "</head>\n<body>\n%s</body>\n</html>\n" % page)
+        open(os.path.join(out, ".nojekyll"), "w").close()
     with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as f:
         f.write(page)
     total = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(out) for f in fs)
