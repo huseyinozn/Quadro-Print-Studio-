@@ -210,31 +210,26 @@ class DualMode(unittest.TestCase):
             load_dual(p)
         self.assertIn("DUAL_NOT_COPYABLE", cm.exception.diags.render())
 
-    def test_inconsistent_offsets_output_fails_only_on_stack_room(self):
+    def test_inconsistent_offsets_output_blocked_by_independent_flow(self):
         plan, d = make_dual_plan(self.dual, self.bad_prof)
         text, _ = generate_dual(self.dual, self.bad_prof, plan)        # forced, for the verifier only
         res, sim = self.verify_text(text, self.bad_prof)
-        self.assertEqual(set(res["issue_counts"]), {"DUAL_STACK_ROOM"}, res["issue_counts"])
+        self.assertFalse(res["passed"])
+        self.assertIn("DUAL_SYNC_FLOW", res["issue_counts"])              # both rooms positive: never auto-accepted
+        self.assertIn("DUAL_SMALL_NEGATIVE_ROOM", res["issue_counts"])    # the small negative room: warning only
+        self.assertNotIn("DUAL_INTO_MATERIAL", res["issue_counts"])
         self.assertAlmostEqual(res["dual_registration_mm"]["left"], 0.21, delta=2e-3)
-        self.assertEqual(res["dual_into_material"]["points"], 0)
-        self.assertLessEqual(res["dual_z_deviation"]["max_mm"], 0.30)
-        rm = res["dual_stack_room"]
-        self.assertLess(rm["right"]["centre_min_mm"], 0.08)
-        self.assertGreaterEqual(rm["left"]["centre_min_mm"], 0.08)
 
     def test_room_analysis_conditions(self):
         plan, d = make_dual_plan(self.dual, self.bad_prof)
         r = plan.room
         self.assertAlmostEqual(r["model_room_difference"], 0.23, delta=1e-4)   # (T3-T1) - (T2-T0) Z offsets
         self.assertFalse(r["conditions"]["synchronised_flow"])
-        both_other = 0
         for x in r["sync_flow_failures"]:
             self.assertIn(x["pair"], ("T0+T1", "T2+T3"))
-            mine = "colour 1" if x["pair"] == "T0+T1" else "colour 2"
-            if x["below_left"] != mine and x["below_right"] != mine:     # both on the other colour: offset mismatch
-                both_other += 1
-                self.assertAlmostEqual(abs(x["room_left"] - x["room_right"]), 0.23, delta=2e-3)
-        self.assertGreater(both_other, 0)
+            # what remains after the small-negative rule: both rooms positive (or a large negative room)
+            self.assertTrue(x["kind"] == "independent flow mismatch" or x["room_left"] <= -0.05 or x["room_right"] <= -0.05, x)
+        self.assertTrue(r["sync_flow_failures"])
         self.assertLess(r["before"]["right"]["centre_min"], 0.08)
 
     def test_sync_flow_checked_point_by_point(self):
@@ -422,6 +417,89 @@ class DualThresholds(unittest.TestCase):
             self.assertGreater(res["raised_travel_z_moves"], 0)
         self.assertEqual(res["dual_travel_drag"]["moves"], 0, res["dual_travel_drag"])
         self.assertEqual(res["visits_failed"], 0, res["visits_failed_examples"])
+
+
+GROW_MISMATCH = {"T0": {"x": 0.0, "y": 0.0, "z": 0.0}, "T1": {"x": 0.06, "y": -0.25, "z": 0.15},
+                 "T2": {"x": -1.55, "y": -0.05, "z": 0.10}, "T3": {"x": -1.74, "y": -0.30, "z": 0.02}}
+
+
+class DualSmallNegativeRoom(unittest.TestCase):
+    """Owner rule: on extrusion moves where the colours stack or meet, a negative local room smaller
+    than 0.050 mm is an accepted deviation (warning), in the planner and the verifier alike."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.grow, _ = load_dual(synth_dual.write(os.path.join(cls.tmp, "g.gcode"), layers=24, grow=True))
+
+    def test_rule_boundary(self):
+        from quadro_studio.dualtol import small_negative, DUAL_LIMITS
+        self.assertEqual(DUAL_LIMITS["small_negative_room"], 0.050)
+        self.assertEqual(DUAL_LIMITS["into_material"], 0.03)            # travel / wipe / descent unchanged
+        self.assertTrue(small_negative(-0.019))
+        self.assertTrue(small_negative(-0.049))
+        self.assertFalse(small_negative(-0.050))
+        self.assertFalse(small_negative(-0.051))
+        self.assertFalse(small_negative(0.0))
+
+    def test_mismatch_with_only_small_negative_room_passes_with_warnings(self):
+        p = load_profile(synth_profile.build(os.path.join(self.tmp, "m.zip"), offsets=GROW_MISMATCH))[0]
+        plan, d = make_dual_plan(self.grow, p)
+        self.assertTrue(d.ok(), d.render())
+        self.assertIn("PLAN_SMALL_NEGATIVE_ROOM", {w.code for w in d.warnings})
+        self.assertLess(plan.room["before"]["right"]["centre_min"], 0)
+        text, _ = generate_dual(self.grow, p, plan)
+        out = os.path.join(self.tmp, "m.gcode")
+        with open(out, "w") as f:
+            f.write(text)
+        res, _ = verify_dual(p, self.grow.models, out, plan.foundation_layers)
+        self.assertTrue(res["passed"], [i for i in res["issues"] if i["severity"] == "error"][:3])
+        self.assertIn("DUAL_SMALL_NEGATIVE_ROOM", res["issue_counts"])
+        self.assertLess(res["dual_stack_room"]["right"]["centre_min_mm"], 0)
+        self.assertGreater(res["dual_stack_room"]["right"]["centre_min_mm"], -0.050)
+
+    def test_planner_boundary(self):
+        from quadro_studio.dualz import analyse_z
+        from quadro_studio.dualroom import analyse_room
+        p = load_profile(synth_profile.build(os.path.join(self.tmp, "c.zip"), meshes=FLAT, offsets=CONSISTENT))[0]
+        plan, d = make_dual_plan(self.grow, p)
+        base = plan.dstar
+        for room, ok in ((-0.049, True), (-0.050, False), (-0.051, False)):
+            plan.dstar = base + (0.2 - room)          # colour 2 sits 0.2 - room higher: colour 1 on it has `room`
+            za = analyse_z(self.grow, plan)
+            rm = analyse_room(plan, za, 0.08, edge_goal=False)
+            self.assertAlmostEqual(rm["before"]["right"]["centre_min"], room, delta=2e-4)
+            self.assertEqual("nozzle_into_material" not in za["blocking"], ok, (room, za["blocking"]))
+            # accepted: no compensation needed; not accepted: compensation needed (or not feasible)
+            self.assertEqual(rm["layers_changed"] == [] and rm["conditions"]["centre_room"], ok, (room, rm["conditions"]))
+        plan.dstar = base
+
+    def test_verifier_boundary(self):
+        p = load_profile(synth_profile.build(os.path.join(self.tmp, "c2.zip"), meshes=FLAT, offsets=CONSISTENT))[0]
+        plan, d = make_dual_plan(self.grow, p)
+        text, _ = generate_dual(self.grow, p, plan)
+        lines = text.split("\n")
+        for room, ok in ((-0.049, True), (-0.050, False), (-0.051, False)):
+            dz = 0.2 - room                              # raise pair B: colour 1 of the next layer gets `room`
+            out, inb = [], False
+            for l in lines:
+                if l.startswith("; FARM_PART"):
+                    m = re.search(r"layer=(\d+) slot=0 tools=(\S+)", l)
+                    inb = m.group(2) == "2,3"
+                elif l.startswith(("; FARM_TRANSFER", "; FARM_PARK", "; DUAL_TOWER", "SET_DUAL_CARRIAGE")):
+                    inb = False
+                if inb and l.startswith("G1") and " Z" in l:
+                    l = re.sub(r" Z([-\d.]+)", lambda mm: " Z%.5f" % (float(mm.group(1)) + dz), l)
+                out.append(l)
+            path = os.path.join(self.tmp, "b%.3f.gcode" % room)
+            with open(path, "w") as f:
+                f.write("\n".join(out))
+            res, _ = verify_dual(p, self.grow.models, path, plan.foundation_layers)
+            self.assertAlmostEqual(res["dual_stack_room"]["right"]["centre_min_mm"], room, delta=2e-4)
+            self.assertEqual("DUAL_STACK_ROOM" not in res["issue_counts"], ok, (room, res["issue_counts"]))
+            self.assertEqual("DUAL_INTO_MATERIAL" not in res["issue_counts"], ok, (room, res["issue_counts"]))
+            if ok:
+                self.assertIn("DUAL_SMALL_NEGATIVE_ROOM", res["issue_counts"])
 
 
 class DualFoundationLayers(unittest.TestCase):

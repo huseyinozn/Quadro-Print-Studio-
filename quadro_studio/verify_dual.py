@@ -100,10 +100,70 @@ class DualSim(Sim):
     def end_visit(self):
         v = self.visit
         if v is not None:
+            heads = [t for t, recs in v["rec"].items() if any(r[9] == "ext" for r in recs)]
+            if len(heads) == 2:
+                self._sync(v["layer"], heads, v["rec"])
             for t, recs in v["rec"].items():
                 if recs:
                     self._raster(t, v["layer"], recs)
         super().end_visit()
+
+    def _sync(self, L, heads, rec):
+        """One E for both heads of a pair: per extrusion piece, the room under each head's bead
+        centre (on layer L-1) and the E it needs there; the slice E (what the file gives) must lie in
+        both +/- flow_tol intervals. A small negative room on one model is the owner's accepted
+        deviation (warning); both rooms positive and no common E is an error."""
+        a, b = sorted(heads)
+        ea = [r for r in rec[a] if r[9] == "ext"]
+        eb = [r for r in rec[b] if r[9] == "ext"]
+        if len(ea) != len(eb) or not ea:
+            return
+        lim = self.limits
+        mdl = self.models[0]
+        hnom = mdl.blocks[L - 1].height if 1 <= L <= mdl.layer_count else 0.2
+        af = math.pi * (self.prof.extruders[a].filament_diameter / 2.0) ** 2
+        tol = TOL["e_found_rel"]
+
+        def rooms(rs):
+            xm = np.array([0.5 * (r[1] + r[3]) for r in rs]); ym = np.array([0.5 * (r[2] + r[4]) for r in rs])
+            zm = np.array([0.5 * (r[5] + r[6]) for r in rs])
+            ci, cj = self._cells(xm, ym)
+            ok = (self.r_top[ci, cj] > -1e8) & (self.r_lay[ci, cj] == L - 1)
+            return np.where(ok, zm - self.r_top[ci, cj], np.nan)
+        ra, rb = rooms(ea), rooms(eb)
+        segs = np.array([max(math.hypot(r[3] - r[1], r[4] - r[2]), 1e-9) for r in ea])
+        e = np.array([r[7] for r in ea])
+        w = e * af / segs / hnom + hnom * (1 - math.pi / 4)
+        A = lambda r: np.maximum(0.0, (w - r * (1 - math.pi / 4)) * r)
+        both = ~np.isnan(ra) & ~np.isnan(rb)
+        if not both.any():
+            return
+        na = A(np.maximum(np.nan_to_num(ra), 0.0)) / A(np.full_like(w, hnom))
+        nb = A(np.maximum(np.nan_to_num(rb), 0.0)) / A(np.full_like(w, hnom))
+        ok_a = (na * (1 - tol) <= 1 + 1e-12) & (1 <= na * (1 + tol) + 1e-12)
+        ok_b = (nb * (1 - tol) <= 1 + 1e-12) & (1 <= nb * (1 + tol) + 1e-12)
+        sneg = lim["small_negative_room"]
+        no_e = both & ~(ok_a & ok_b)
+        small = no_e & (((ra < 0) & (ra > -sneg)) | ((rb < 0) & (rb > -sneg))) & ~((ra <= -sneg) | (rb <= -sneg))
+        indep = no_e & (ra > 0) & (rb > 0)
+        st = self.rstats.setdefault("sync", dict(pieces=0, accepted=0, independent=0, first=None, examples=[]))
+        st["pieces"] += int(both.sum())
+        if small.any():
+            st["accepted"] += int(small.sum())
+            q = int(np.nonzero(small)[0][0])
+            self.issue("warning", "DUAL_SMALL_NEGATIVE_ROOM", "T%d+T%d layer %d: no common E (room %.3f / %.3f mm); small negative room "
+                       "accepted, slice E applied (needs %.0f %% / %.0f %%)" % (a, b, L, ra[q], rb[q], na[q] * 100, nb[q] * 100), ea[q][0])
+        if indep.any():
+            st["independent"] += int(indep.sum())
+            q = int(np.nonzero(indep)[0][0])
+            item = dict(line=ea[q][0], pair="T%d+T%d" % (a, b), layer=L, room_a=round(float(ra[q]), 4), room_b=round(float(rb[q]), 4),
+                        e_a_pct=round(float(na[q]) * 100, 1), e_b_pct=round(float(nb[q]) * 100, 1))
+            if st["first"] is None:
+                st["first"] = item
+            if len(st["examples"]) < 20:
+                st["examples"].append(item)
+            self.issue("error", "DUAL_SYNC_FLOW", "T%d+T%d layer %d: one E cannot fit both heads (room %.3f / %.3f mm needs %.0f %% / "
+                       "%.0f %% of the slice E, +/-%.1f %%)" % (a, b, L, ra[q], rb[q], na[q] * 100, nb[q] * 100, tol * 100), ea[q][0])
 
     def _k(self, rc):
         if rc not in self._kern:
@@ -175,11 +235,19 @@ class DualSim(Sim):
             d = st.setdefault("room_" + side, dict(centre_min=1e9, edge_min=1e9, centre_where=None, edge_where=None, short=0))
             if room[q] < d["centre_min"]:
                 d["centre_min"], d["centre_where"] = float(room[q]), dict(line=int(lns[q]), head="T%d" % t, layer=L)
-            bad = onc & (room < self.h_limits[0] - EPS)
+            small = onc & (room < 0) & (room > -lim["small_negative_room"])
+            bad = onc & (room < self.h_limits[0] - EPS) & ~small
+            if small.any():
+                d["accepted"] = d.get("accepted", 0) + int(small.sum())
+                qs = int(np.argmin(np.where(small, room, 1e9)))
+                self.issue("warning", "DUAL_SMALL_NEGATIVE_ROOM", "T%d layer %d: %.3f mm room under the bead on the other colour "
+                           "(accepted deviation, < %.3f mm; slice E kept)" % (t, L, float(room[qs]), lim["small_negative_room"]), int(lns[qs]))
             if bad.any():
                 d["short"] += int(bad.sum())
+                qb = int(np.argmin(np.where(bad, room, 1e9)))
                 self.issue("error", "DUAL_STACK_ROOM", "T%d layer %d: only %.3f mm room under the bead printed on the other colour "
-                           "(needed %.2f)" % (t, L, float(room[q]), self.h_limits[0]), int(lns[q]))
+                           "(needed %.2f; a negative room is accepted only if smaller than %.3f mm)"
+                           % (t, L, float(room[qb]), self.h_limits[0], lim["small_negative_room"]), int(lns[qb]))
         I, J, Z, LN = [], [], [], []
         for rc in np.unique(rr):
             K = self._k(int(rc))
@@ -200,7 +268,8 @@ class DualSim(Sim):
         dep = np.where(oth, below - Z, -1e9)
         if oth.any():
             st["into_seen"] = max(st.get("into_seen", 0.0), float(dep.max()))
-        bad = dep > lim["into_material"] + EPS
+        # extrusion below the other colour's surface: owner rule, less than 0.050 mm is accepted
+        bad = dep >= lim["small_negative_room"]
         if bad.any():
             q = int(np.argmax(dep))
             d = st["into"]
@@ -209,8 +278,8 @@ class DualSim(Sim):
                 d["max"], d["where"] = float(dep[q]), dict(line=int(LN[q]), head="T%d" % t, layer=L, kind="extrude")
             if len(d["examples"]) < 20:
                 d["examples"].append(dict(line=int(LN[q]), head="T%d" % t, layer=L, kind="extrude", depth=round(float(dep[q]), 4)))
-            self.issue("error", "DUAL_INTO_MATERIAL", "T%d layer %d prints %.3f mm below the other colour's material (allowed %.2f)"
-                       % (t, L, float(dep[q]), lim["into_material"]), int(LN[q]))
+            self.issue("error", "DUAL_INTO_MATERIAL", "T%d layer %d prints %.3f mm below the other colour's material (accepted only "
+                       "< %.3f)" % (t, L, float(dep[q]), lim["small_negative_room"]), int(LN[q]))
         chg = oth & (bl == L - 1)
         if chg.any():
             er = np.where(chg, Z - below, 1e9)
@@ -218,10 +287,14 @@ class DualSim(Sim):
             d = st.setdefault("room_" + SIDE[t], dict(centre_min=1e9, edge_min=1e9, centre_where=None, edge_where=None, short=0))
             if er[q] < d["edge_min"]:
                 d["edge_min"], d["edge_where"] = float(er[q]), dict(line=int(LN[q]), head="T%d" % t, layer=L)
-            if er[q] < -EPS:
-                d["short"] += int((er < -EPS).sum())
-                self.issue("error", "DUAL_STACK_ROOM", "T%d layer %d: bead edge %.3f mm below the other colour's top (no room)"
-                           % (t, L, -float(er[q])), int(LN[q]))
+            ebad = er <= -lim["small_negative_room"]
+            esmall = (er < 0) & ~ebad
+            if esmall.any():
+                d["accepted"] = d.get("accepted", 0) + int(esmall.sum())
+            if ebad.any():
+                d["short"] += int(ebad.sum())
+                self.issue("error", "DUAL_STACK_ROOM", "T%d layer %d: bead edge %.3f mm below the other colour's top (accepted only "
+                           "< %.3f)" % (t, L, -float(er[q]), lim["small_negative_room"]), int(LN[q]))
             dv = np.abs((Z - below) - hnom)
             d = st["z_dev"]
             d["cells"] += int(chg.sum())
@@ -532,9 +605,12 @@ def analyse_dual(sim: DualSim, registration_limit=None, min_gap=2.0, region_tol=
     res["raised_travel_z_moves"] = len(sim.travel_lifts)
     res["dual_stack_room"] = {side: dict(centre_min_mm=(round(v["centre_min"], 4) if v["centre_min"] < 1e8 else None),
                                          edge_min_mm=(round(v["edge_min"], 4) if v["edge_min"] < 1e8 else None),
-                                         centre_where=v["centre_where"], edge_where=v["edge_where"], short_cells=v["short"])
+                                         centre_where=v["centre_where"], edge_where=v["edge_where"], short_cells=v["short"],
+                                         accepted_cells=v.get("accepted", 0))
                               for side, v in ((k[5:], rs[k]) for k in ("room_left", "room_right") if k in rs)}
     res["dual_stack_room_min_mm"] = sim.h_limits[0]
+    res["dual_small_negative_rule_mm"] = sim.limits["small_negative_room"]
+    res["dual_sync_flow"] = rs.get("sync")
     errc = sum(c for code, c in sim.issue_counts.items() if any(i["code"] == code and i["severity"] == "error" for i in sim.issues))
     res["issues"] = sim.issues
     res["issue_counts"] = sim.issue_counts

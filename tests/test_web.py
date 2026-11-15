@@ -209,6 +209,24 @@ class WebExamplesAndMeshMarks(WebBase):
         st, _, _ = self.req("/api/download/" + r["job_id"])
         self.assertEqual(st, 403)
 
+    def test_dual_small_negative_room_generates_and_downloads_with_warning(self):
+        import synth_dual
+        from test_dual import GROW_MISMATCH
+        dual = synth_dual.dual_gcode(layers=20, grow=True).encode()
+        prof = open(synth_profile.build(os.path.join(self.tmp, "grow_mm.zip"), offsets=GROW_MISMATCH), "rb").read()
+        body, ct = multipart({"profile": ("p.zip", prof), "model": ("grow.gcode", dual), "mode": (None, "dual"), "count": (None, "2")})
+        st, data, _ = self.req("/api/plan", body, ct)
+        r = json.loads(data)
+        self.assertEqual(r["state"], "planned", r.get("problems"))
+        self.assertIn("PLAN_SMALL_NEGATIVE_ROOM", {w["code"] for w in r["warnings"]})
+        s = self.run_job(r["job_id"])
+        self.assertEqual(s["state"], "passed", s)
+        self.assertIn("DUAL_SMALL_NEGATIVE_ROOM", {w["code"] for w in s["verify"]["warnings"]})
+        self.assertLess(s["verify"]["stack_room"]["right"]["centre_min_mm"], 0)
+        st, data, _ = self.req(s["download_url"])
+        self.assertEqual(st, 200)
+        self.assertEqual(hashlib.sha256(data).hexdigest(), s["gcode_sha256"])
+
     def test_own_upload_of_differently_coloured_models_not_changed(self):
         # the same file uploaded as the user's own model: its right model is NOT silently replaced
         from quadro_studio.web.server import EXAMPLE_DIR

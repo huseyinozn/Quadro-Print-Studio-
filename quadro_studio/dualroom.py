@@ -65,13 +65,32 @@ def analyse_room(plan, za, room_min, t_layer=(0.08, 0.30), flow_tol=0.017, width
         before[side] = dict(centre_min=min(c) if c else None, centre_max=max(c) if c else None,
                             edge_min=min(e) if e else None)
 
+    from .dualtol import small_negative
+
+    def ok_room(v, need):
+        return v is None or v >= need - EPS or small_negative(v)
+    # every centre room must be enough (>= room_min) or a small negative accepted deviation: a positive
+    # room below room_min is never accepted
+    pos_short = []
+    for side in sides:
+        for L, v in sides[side]["room_layers"].items():
+            for key in ("c1_on_c2", "c2_on_c1"):
+                mp = (v.get(key) or {}).get("min_pos")
+                if mp is not None and mp < room_min - EPS:
+                    pos_short.append(dict(side=side, layer=int(L), pair="T0+T1" if key == "c1_on_c2" else "T2+T3", room=mp,
+                                          slicer_line=v[key].get("slicer_line")))
+    pos_short.sort(key=lambda x: x["layer"])
+    ok_before = not pos_short and all(ok_room(before[sd]["centre_min"], room_min) and ok_room(before[sd]["edge_min"], 0.0) for sd in before)
+    if ok_before:
+        # no compensation needed: every room is enough, or a small negative accepted deviation
+        nothing = dict(uA={}, uB={})
     # ---- 2. greedy local compensation (layers above the independent ones) --------------------------
     grid = np.arange(-0.40, 0.60 + 1e-9, step)
     UA, UB = np.meshgrid(grid, grid, indexing="ij")
     uA = {L: 0.0 for L in range(0, nL + 1)}
     uB = {L: 0.0 for L in range(0, nL + 1)}
     unmet = []
-    for L in range(F + 1, nL + 1):
+    for L in (range(F + 1, nL + 1) if not ok_before else []):
         pa, pb = uA[L - 1], uB[L - 1]
         hard = np.ones_like(UA, dtype=bool)
         short = np.zeros_like(UA)                      # how far the room goals are missed (mm)
@@ -160,8 +179,16 @@ def analyse_room(plan, za, room_min, t_layer=(0.08, 0.30), flow_tol=0.017, width
         res["sync_flow_failures"] = sp1["examples"]
     else:
         res["sync_flow_failures"] = []
-    centre_ok = all(a["centre_min"] is None or a["centre_min"] >= room_min - EPS for a in after.values())
-    edge_ok = all(a["edge_min"] is None or a["edge_min"] >= -EPS for a in after.values())
+    centre_ok = all(ok_room(a["centre_min"], room_min) for a in after.values()) and (bool(changed) or not pos_short)
+    res["positive_room_short"] = pos_short[:20]
+    edge_ok = all(ok_room(a["edge_min"], 0.0) for a in after.values())
+    res["accepted_small_negative"] = dict(
+        rule_mm=DUAL_LIMITS["small_negative_room"],
+        centre={sd: after[sd]["centre_min"] for sd in after if after[sd]["centre_min"] is not None and small_negative(after[sd]["centre_min"])},
+        edge={sd: after[sd]["edge_min"] for sd in after if after[sd]["edge_min"] is not None and small_negative(after[sd]["edge_min"])},
+        sync=(res.get("sync_with_compensation") or {}).get("stats", {}).get("accepted_examples", []),
+        sync_points=(res.get("sync_with_compensation") or {}).get("stats", {}).get("accepted_points", 0),
+        sync_moves=(res.get("sync_with_compensation") or {}).get("stats", {}).get("accepted_moves", 0))
     res["feasible"] = bool(centre_ok and edge_ok and not res["sync_flow_failures"] and res["ends_on_target"])
     res["conditions"] = dict(centre_room=centre_ok, edge_room=edge_ok, synchronised_flow=not res["sync_flow_failures"],
                              back_on_target=res["ends_on_target"])
@@ -273,7 +300,35 @@ def sync_flow_points(dual, plan, room_min, flow_tol=0.017, uA=None, uB=None, spa
                 need_b = A(np.maximum(rb, 0.0)) / A(np.full_like(rb, h[L]))
                 lo = np.maximum(need_a, need_b) * (1.0 - flow_tol)
                 hi = np.minimum(need_a, need_b) * (1.0 + flow_tol)
-                bad = both & ((lo > hi + 1e-12) | (ra <= 0) | (rb <= 0))
+                from .dualtol import DUAL_LIMITS as _DLm
+                neg_lim = _DLm["small_negative_room"]
+                # the file prints the slice E (100 %) on these moves; it must lie in both heads' intervals
+                e_ok_a = (need_a * (1.0 - flow_tol) <= 1.0 + 1e-12) & (1.0 <= need_a * (1.0 + flow_tol) + 1e-12)
+                e_ok_b = (need_b * (1.0 - flow_tol) <= 1.0 + 1e-12) & (1.0 <= need_b * (1.0 + flow_tol) + 1e-12)
+                small_a = (ra < 0) & (ra > -neg_lim)
+                small_b = (rb < 0) & (rb > -neg_lim)
+                big_neg = (ra <= -neg_lim) | (rb <= -neg_lim)
+                no_e = both & ~(e_ok_a & e_ok_b)
+                # accepted: the mismatch comes from a small negative room on one model; the positive model
+                # (if any) still gets an E inside its own interval or the room there is also small negative
+                # owner rule: a small negative room (< 0.050 mm) on an extrusion move is an accepted deviation;
+                # the move keeps the slice E (100 %), reported as a warning together with both heads' need
+                acc = no_e & ~big_neg & (small_a | small_b)
+                if acc.any():
+                    stats["accepted_points"] = stats.get("accepted_points", 0) + int(acc.sum())
+                    mv = np.unique(pa["k"][acc])
+                    stats["accepted_moves"] = stats.get("accepted_moves", 0) + len(mv)
+                    for i in np.nonzero(acc)[0][:1]:
+                        m = pa["ext"][int(pa["k"][i])]
+                        if len(stats.setdefault("accepted_examples", [])) < max_items:
+                            stats["accepted_examples"].append(dict(layer=L, pair="T%d+T%d" % (a, b), slicer_line=m.line,
+                                                                   room_left=round(float(ra[i]), 4), room_right=round(float(rb[i]), 4),
+                                                                   e_left_pct=round(float(need_a[i]) * 100, 1),
+                                                                   e_right_pct=round(float(need_b[i]) * 100, 1), e_applied_pct=100.0))
+                bad = no_e & ~acc
+                # independent flow mismatch: both rooms positive and the one E fits only one head
+                indep = bad & (ra > 0) & (rb > 0)
+                stats["independent_points"] = stats.get("independent_points", 0) + int(indep.sum())
                 comp = both & ~bad & ((np.abs(need_a - 1.0) > flow_tol) | (np.abs(need_b - 1.0) > flow_tol))
                 stats["compensated_points"] += int(comp.sum())
                 if bad.any():
@@ -289,6 +344,8 @@ def sync_flow_points(dual, plan, room_min, flow_tol=0.017, uA=None, uB=None, spa
                         pxa = plan.phys_xy(a, float(pa["xs"][i]) + slot.dx, float(pa["ys"][i]) + slot.dy)
                         pxb = plan.phys_xy(b, float(pb["xs"][i]) + slot.dx, float(pb["ys"][i]) + slot.dy)
                         item = dict(layer=L, pair="T%d+T%d" % (a, b), slicer_line=m.line, feature=m.ftype,
+                                    kind=("independent flow mismatch" if (ra[i] > 0 and rb[i] > 0) else "negative room >= %.3f mm" % neg_lim),
+                                    e_applied_pct=100.0,
                                     left_xy=[round(pxa[0], 2), round(pxa[1], 2)], right_xy=[round(pxb[0], 2), round(pxb[1], 2)],
                                     room_left=round(float(ra[i]), 4), room_right=round(float(rb[i]), 4),
                                     e_left_pct=round(float(need_a[i]) * 100, 1), e_right_pct=round(float(need_b[i]) * 100, 1),

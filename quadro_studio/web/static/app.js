@@ -565,6 +565,7 @@
           <span>Head spacing while printing together</span><b>${fmt(v.min_sync_head_gap_mm)} mm</b>
           <span>Heads parked, heaters off at the end</span><b>${v.final_parked && v.heaters_off ? "yes" : "no"}</b>
         </div>
+        ${(v.warnings || []).length ? `<ul class="warn" id="result-warnings">${v.warnings.map(w => `<li>${escapeHtml(w.text)} (${w.count}×)<small>${escapeHtml(w.detail)}</small></li>`).join("")}</ul>` : ""}
         <a class="download" id="download" href="${s.download_url}" download="${escapeHtml(s.filename)}">Download G-code</a>
         <p class="fine">These are software checks of the generated file. It has not been tested on your printer. Watch the first layers of each head.</p>
         <p class="fine hash">File ${escapeHtml(s.filename)} · SHA-256 ${s.gcode_sha256}</p>`;

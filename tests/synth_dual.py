@@ -22,7 +22,14 @@ DUAL_CFG = CONFIG.replace("; CONFIG_BLOCK_END", """; filament_colour = #0000FF;#
 ; CONFIG_BLOCK_END""")
 
 
-def region(tool, L, x0, y0, w, h, dx):
+def region(tool, L, x0, y0, w, h, dx, grow=False):
+    if grow:
+        # colour 1 (T0/T1) grows into colour 2 every layer: colour 1 is printed on colour 2, never the reverse
+        f = min(0.8, 0.3 + 0.02 * max(0, L - 5))     # starts growing above the independent layers
+        c1 = tool in (0, 1)
+        gap = 0.42                                    # neighbouring perimeters one line apart, as a slicer places them
+        rx = x0 + (0.0 if c1 else f * w + gap) + (dx if tool in (1, 3) else 0.0)
+        return rx, y0, (f * w if c1 else (1.0 - f) * w - gap), h
     half = w / 2.0
     colour1_left = (L - 1) // 10 % 2 == 0
     left_half = (tool in (0, 1)) == colour1_left
@@ -31,7 +38,7 @@ def region(tool, L, x0, y0, w, h, dx):
 
 
 def dual_gcode(size=(24.0, 14.0), layers=12, center=(110.0, 150.0), dx=80.0, temp=215, bed=55,
-               differ_layer=None, right_patch=False, renumber=False):
+               differ_layer=None, right_patch=False, renumber=False, grow=False):
     """renumber=True writes the slice with left model T0/T1 and right model T2/T3
     (slice tool -> physical head: T0->T0, T1->T2, T2->T1, T3->T3)."""
     w, h = size
@@ -62,7 +69,7 @@ def dual_gcode(size=(24.0, 14.0), layers=12, center=(110.0, 150.0), dx=80.0, tem
                         "; CP TOOLCHANGE END"]
                 cur = t
             hd = {0: 0, 1: 2, 2: 1, 3: 3}[t] if renumber else t
-            rx, ry, rw, rh = region(hd, L, x0, y0, w, h, dx)
+            rx, ry, rw, rh = region(hd, L, x0, y0, w, h, dx, grow)
             if right_patch and hd == 1 and L == differ_layer:
                 rw *= 0.6                                  # the right model's colour-1 region differs on this layer
             out.append("; printing object box id:0 copy 0")

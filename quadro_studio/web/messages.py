@@ -101,6 +101,8 @@ VERIFY_PLAIN = {
     "TOWER_THICKNESS": "A wipe tower layer has the wrong thickness.",
     "TOWER_BASE": "A wipe tower layer has nothing below it.",
     "DUAL_Z_DEVIATION": "Where one colour is printed on the other, the layer is further from its nominal height than allowed.",
+    "DUAL_SMALL_NEGATIVE_ROOM": "Accepted quality deviation: where the colours stack or meet, the nozzle has slightly less than no room (negative, smaller than 0.050 mm); the slice's filament amount is kept on that move.",
+    "DUAL_SYNC_FLOW": "On a move both heads of a pair print together, one filament amount cannot suit both models (both have positive room).",
     "DUAL_STACK_ROOM": "Where one colour is printed on the other there is not enough room under the nozzle for the filament.",
     "DUAL_INTO_MATERIAL": "A nozzle prints or descends lower than the other colour's material.",
     "DUAL_TRAVEL_DRAG": "A travel or wipe passes through the other colour's material.",
@@ -148,11 +150,11 @@ def headline(diags):
 def verify_summary(res, exit_code):
     if not res:
         return dict(passed=False, problems=[dict(code="VERIFY_ERROR", text="The verification could not be completed.")])
-    probs = []
+    probs, warns = [], []
     for code, n in sorted(res.get("issue_counts", {}).items()):
         ex = next((i for i in res.get("issues", []) if i["code"] == code), None)
-        probs.append(dict(code=code, count=n, text=VERIFY_PLAIN.get(code, "Check %s failed." % code),
-                          detail=ex["message"] if ex else ""))
+        item = dict(code=code, count=n, text=VERIFY_PLAIN.get(code, "Check %s failed." % code), detail=ex["message"] if ex else "")
+        (warns if ex and ex.get("severity") == "warning" else probs).append(item)
     st = res.get("stats", {})
     fs = res.get("final_state", {})
     return dict(
@@ -161,7 +163,7 @@ def verify_summary(res, exit_code):
         min_gap_mm=res.get("min_gap_between_copies"),
         first_layer_max_dev_mm=st.get("first_layer_max_dev"), min_transfer_clearance_mm=st.get("min_transfer_clear"),
         min_carriage_gap_mm=st.get("min_carriage_gap"), min_sync_head_gap_mm=st.get("min_synchronized_head_gap"), final_parked=fs.get("carriages_parked"),
-        heaters_off=fs.get("heaters_off"), problems=probs,
+        heaters_off=fs.get("heaters_off"), problems=probs, warnings=warns,
         layers_per_copy=sorted((res.get("layers_per_copy") or {}).values()),
         synchronized_from_layer=res.get("synchronized_from_layer"),
         parked_heads=(res.get("parked_heads") or {}).get("heads"),

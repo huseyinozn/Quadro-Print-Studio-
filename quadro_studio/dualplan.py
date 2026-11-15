@@ -430,9 +430,14 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
                       max(max(v["stats"]["sink_extrude"]["max_depth"], v["stats"]["into_lower_layer"]["max_depth"]) for v in s0.values()),
                       sum(v["stats"]["sink_extrude"]["points"] + v["stats"]["into_lower_layer"]["points"] for v in s0.values()),
                       sum(v["stats"]["sink_travel"]["moves"] for v in s0.values()), plan.dstar - plan.z_splits["symmetric"]["dstar"]))
+    ext_lim = _DL["small_negative_room"]
     check("into_material", not any(pts.values()),
-          "Nozzle into the other colour while printing: %s points (deepest %.3f mm; allowed %.2f mm).%s"
-          % (", ".join("%s %d" % kv for kv in pts.items()) or "0", mx, sk, alt_txt), value=round(mx, 5), limit=sk)
+          "Nozzle below the other colour while extruding: %s points at %.3f mm or more (deepest %.3f mm; on extrusion moves less "
+          "than %.3f mm is an accepted deviation, travels/wipes/descents keep %.2f mm).%s"
+          % (", ".join("%s %d" % kv for kv in pts.items()) or "0", ext_lim, mx, ext_lim, sk, alt_txt), value=round(mx, 5), limit=ext_lim)
+    if plan.z_analysis and 0.0 < mx < ext_lim and mx > sk:
+        diags.warning("PLAN_SMALL_NEGATIVE_ROOM", "a nozzle extrudes up to %.3f mm below the other colour's surface (accepted: < %.3f mm)"
+                      % (mx, ext_lim))
     # travels / wipes through the other colour: raised travel where the slice path would drag
     drags = [dict(dm, side=side) for side, v in (plan.z_analysis or {"sides": {}})["sides"].items() for dm in v["drag_moves"]]
     lifts = [dm for v in (plan.z_analysis or {"sides": {}})["sides"].values() for dm in v["lift_moves"]] if drags else []
@@ -460,25 +465,33 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
         plan.room = rm
         b, a_ = rm["before"], rm["after"]
         if rm["feasible"] and not rm["layers_changed"]:
-            txt = "room under every bead printed on the other colour: left %.3f mm, right %.3f mm (min %.2f)" % (
-                b["left"]["centre_min"], b["right"]["centre_min"], room_min)
+            txt = ("smallest room under a bead printed on the other colour: left %.3f mm, right %.3f mm (needed %.2f mm; a negative "
+                   "room smaller than %.3f mm is an accepted deviation)" % (b["left"]["centre_min"], b["right"]["centre_min"], room_min,
+                                                                            _DL["small_negative_room"]))
         else:
             fails = rm["sync_flow_failures"]
             ex = fails[0] if fails else None
             txt = ("as planned the smallest room under a bead printed on the other colour is %.3f mm (left) and %.3f mm (right), "
-                   "at colour borders %.3f / %.3f mm (needed: %.2f mm under the bead, >= 0 at its edge). Local layer compensation "
-                   "(pair heights per layer, back on target from layer %d) reaches %.3f / %.3f mm; " % (
+                   "at colour borders %.3f / %.3f mm (needed: %.2f mm under the bead, >= 0 at its edge; a negative room smaller "
+                   "than %.3f mm is accepted). %s" % (
                        b["left"]["centre_min"], b["right"]["centre_min"], b["left"]["edge_min"], b["right"]["edge_min"], room_min,
-                       rm["back_on_target_from"], a_["left"]["centre_min"], a_["right"]["centre_min"]))
+                       _DL["small_negative_room"],
+                       ("Local layer compensation (pair heights per layer, back on target from layer %d) reaches %.3f / %.3f mm; "
+                        % (rm["back_on_target_from"], a_["left"]["centre_min"], a_["right"]["centre_min"])) if rm["layers_changed"]
+                       else "No local layer compensation is needed for the room; "))
             why = []
-            if not rm["conditions"]["centre_room"]:
+            if rm.get("positive_room_short") and not rm["layers_changed"]:
+                ps = rm["positive_room_short"][0]
+                why.append("positive room below %.2f mm (never accepted): first at layer %d, %s, %s model, %.3f mm (slicer line %s)"
+                           % (room_min, ps["layer"], ps["pair"], ps["side"], ps["room"], ps["slicer_line"]))
+            if not rm["conditions"]["centre_room"] and rm["layers_changed"]:
                 why.append("raises needed on consecutive layers add up (max %.2f mm) and still miss %d layer(s) from layer %d"
                            % (rm["max_raise"], len(rm["goals_unmet"]), rm["goals_unmet"][0]["layer"]) if rm["goals_unmet"] else
                            "the room under the bead stays below the minimum")
             if not rm["conditions"]["synchronised_flow"]:
                 fc = rm["sync_with_compensation"]["first_conflict"]
                 st = rm["sync_with_compensation"]["stats"]
-                why.append("one synchronised E cannot fit both models on the same move: first at layer %d, %s, slicer line %d (%s): "
+                why.append("(" + (fc or {}).get("kind", "") + ") one synchronised E cannot fit both models on the same move: first at layer %d, %s, slicer line %d (%s): "
                            "left (%.2f, %.2f) room %.3f mm on %s needs %.0f %% of the slice E, right (%.2f, %.2f) room %.3f mm on %s "
                            "needs %.0f %% (accepted +/-%.1f %% each, no common E); %d moves in %d layer/pair turns" % (
                                fc["layer"], fc["pair"], fc["slicer_line"], fc["feature"], fc["left_xy"][0], fc["left_xy"][1],
@@ -490,6 +503,19 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
                            "colour 2 on the left stays within %.2f mm of colour 1: the best average is %.4f mm" % (
                                rm["edge_layers"][0], rm["edge_layers"][-1], DUAL_LIMITS_INTO, rm["edge_room_bound"]) if rm["edge_layers"] else "")
             txt += "; ".join(w for w in why if w) + "."
+        acc = rm.get("accepted_small_negative") or {}
+        if acc.get("centre") or acc.get("edge") or acc.get("sync_points"):
+            ex = (acc.get("sync") or [None])[0]
+            diags.warning("PLAN_SMALL_NEGATIVE_ROOM",
+                          "accepted quality deviation (negative room smaller than %.3f mm on extrusion moves where the colours stack or "
+                          "meet): smallest room %s; %d points on %d synchronised moves keep the slice E (100 %%)%s" % (
+                              acc["rule_mm"], ", ".join("%s %.3f mm" % kv for kv in list(acc.get("centre", {}).items()) + [
+                                  ("%s border" % k, v) for k, v in acc.get("edge", {}).items()]) or "-",
+                              acc.get("sync_points", 0), acc.get("sync_moves", 0),
+                              (", e.g. layer %d %s slicer line %d: room left %.3f / right %.3f mm, E applied 100 %% (left needs %.0f %%, "
+                               "right %.0f %%)" % (ex["layer"], ex["pair"], ex["slicer_line"], ex["room_left"], ex["room_right"],
+                                                   ex["e_left_pct"], ex["e_right_pct"])) if ex else ""))
+        plan.room_warnings = acc
         check("colour_stack_room", rm["feasible"], "Room for the filament: " + txt,
               value=round(min(v for v in (b["left"]["centre_min"], b["right"]["centre_min"]) if v is not None), 4)
               if b["left"]["centre_min"] is not None else None, limit=room_min)

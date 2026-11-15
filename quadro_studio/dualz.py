@@ -112,13 +112,14 @@ def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40
     sides = {"left": (0, 2), "right": (1, 3)}
     from .dualtol import DUAL_LIMITS, EPS
     sink_tol = DUAL_LIMITS["into_material"] if sink_tol is None else sink_tol
+    ext_lim = DUAL_LIMITS["small_negative_room"]   # extrusion: room > -0.050 mm accepted (owner rule)
     z_dev = DUAL_LIMITS["z_deviation"] if z_dev is None else z_dev
     nL = len(plan.layer_z)
     F = plan.foundation_layers
     pad = 1.0
     gx = int(math.ceil((bx1 - bx0 + 2 * pad) / RES)) + 1
     gy = int(math.ceil((by1 - by0 + 2 * pad) / RES)) + 1
-    report = dict(raster_mm=RES, into_material_limit_mm=sink_tol, z_deviation_limit_mm=z_dev,
+    report = dict(raster_mm=RES, into_material_limit_mm=sink_tol, extrusion_small_negative_mm=ext_lim, z_deviation_limit_mm=z_dev,
                   nozzle_opening_radius_mm=nozzle_r, sides={})
     kernels = {}
     blocking = set()
@@ -198,7 +199,9 @@ def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40
                         room = np.where(on_other, tip0 - cb, 1e9)
                         q = int(np.argmin(room))
                         key = "c%d_on_c%d" % (col, 3 - col)
+                        posr = np.where(on_other & (room >= 0), room, 1e9)
                         rl[key] = dict(min=round(float(room[q]), 4), max=round(float(np.where(on_other, tip0 - cb, -1e9).max()), 4),
+                                       min_pos=(round(float(posr.min()), 4) if posr.min() < 1e8 else None),
                                        samples=int(on_other.sum()), head="T%d" % t,
                                        at=self_item(plan, slot, t, L, xs[q], ys[q])["x":"y"] if False else
                                        [self_item(plan, slot, t, L, xs[q], ys[q])["x"], self_item(plan, slot, t, L, xs[q], ys[q])["y"]],
@@ -210,7 +213,8 @@ def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40
                     depth = below - ct
                     if same.any():
                         stats["deepest"]["extrude"] = max(stats["deepest"]["extrude"], float(np.where(same, depth, -1e9).max()))
-                    sk_mask = same & (depth > sink_tol + EPS)
+                    # extrusion beside the other colour: the owner's small-negative-room rule applies
+                    sk_mask = same & (depth >= ext_lim)
                     if sk_mask.any():
                         d = stats["sink_extrude"]
                         d["points"] += int(sk_mask.sum())
@@ -236,7 +240,7 @@ def analyse_z(dual, plan, h_limits=None, sink_tol=None, z_dev=None, max_items=40
                         # nozzle below the other colour's top of an earlier layer (separate check)
                         dl = np.where(chg, below - ct, -1e9)
                         stats["deepest"]["extrude"] = max(stats["deepest"]["extrude"], float(dl.max()))
-                        lo = dl > sink_tol + EPS
+                        lo = dl >= ext_lim
                         if lo.any():
                             d = stats["into_lower_layer"]
                             d["points"] += int(lo.sum())
