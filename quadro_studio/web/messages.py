@@ -102,6 +102,7 @@ VERIFY_PLAIN = {
     "TOWER_BASE": "A wipe tower layer has nothing below it.",
     "DUAL_Z_DEVIATION": "Where one colour is printed on the other, the layer is further from its nominal height than allowed.",
     "DUAL_SMALL_NEGATIVE_ROOM": "Accepted quality deviation: where the colours stack or meet, the nozzle has slightly less than no room (negative, smaller than 0.050 mm); the slice's filament amount is kept on that move.",
+    "DUAL_FLOW_MISMATCH": "Quality warning: on some moves both heads have enough room but would need different filament amounts; both use the slicer's amount for that move.",
     "DUAL_SYNC_FLOW": "On a move both heads of a pair print together, one filament amount cannot suit both models (both have positive room).",
     "DUAL_STACK_ROOM": "Where one colour is printed on the other there is not enough room under the nozzle for the filament.",
     "DUAL_INTO_MATERIAL": "A nozzle prints or descends lower than the other colour's material.",
@@ -175,4 +176,5 @@ def verify_summary(res, exit_code):
         into_material_mm=(res.get("dual_into_material") or {}).get("deepest_seen_mm"),
         travel_drag_mm=(res.get("dual_travel_drag") or {}).get("deepest_seen_mm"),
         limits=res.get("dual_limits"),
-        stack_room=res.get("dual_stack_room"), stack_room_min=res.get("dual_stack_room_min_mm"))
+        stack_room=res.get("dual_stack_room"), stack_room_min=res.get("dual_stack_room_min_mm"),
+        flow_warning=(res.get("dual_sync_flow") or {}).get("flow_warning"))

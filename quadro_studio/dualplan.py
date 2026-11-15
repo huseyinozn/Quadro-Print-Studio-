@@ -516,6 +516,16 @@ def make_dual_plan(dual, prof, opts: DualOptions | None = None):
                                "right %.0f %%)" % (ex["layer"], ex["pair"], ex["slicer_line"], ex["room_left"], ex["room_right"],
                                                    ex["e_left_pct"], ex["e_right_pct"])) if ex else ""))
         plan.room_warnings = acc
+        fw = rm.get("flow_warning")
+        plan.flow_warning = fw
+        if fw and fw.get("moves"):
+            w = fw["where"]
+            diags.warning("PLAN_FLOW_MISMATCH",
+                          "quality warning: on %d synchronised moves (%d points) both heads have enough room but need different "
+                          "filament amounts; both use the slice E of the move. Largest difference %.1f %% (%.2fx): layer %d %s "
+                          "slicer line %d, room left %.3f / right %.3f mm needs %.0f %% / %.0f %%" % (
+                              fw["moves"], fw["points"], fw["max_diff_pct"], fw["max_ratio"], w["layer"], w["pair"], w["slicer_line"],
+                              w["room_left"], w["room_right"], w["e_left_pct"], w["e_right_pct"]))
         check("colour_stack_room", rm["feasible"], "Room for the filament: " + txt,
               value=round(min(v for v in (b["left"]["centre_min"], b["right"]["centre_min"]) if v is not None), 4)
               if b["left"]["centre_min"] is not None else None, limit=room_min)

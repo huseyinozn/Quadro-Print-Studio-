@@ -77,16 +77,21 @@ const crypto = require("crypto");
     r.facts = await page.textContent(".facts");
     r.regions_text = await page.textContent("#dual-regions");
     const [dl] = await Promise.all([page.waitForEvent("download"), page.click("#download")]);
-    const p = path.join(outDir, "downloaded.gcode");
+    r.filename = dl.suggestedFilename();
+    const p = path.join(outDir, r.filename);
     await dl.saveAs(p);
+    r.downloaded_path = p;
     r.downloaded_sha256 = crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
     r.sha_matches_verified = (await page.textContent("#result-body")).includes(r.downloaded_sha256);
-    r.filename = dl.suggestedFilename();
-    fs.unlinkSync(p);
+    r.verdict = await page.textContent("#verdict");
+    r.flow_moves = await page.$eval("#flow-moves", e => e.textContent).catch(() => null);
+    r.flow_max = await page.$eval("#flow-max", e => e.textContent).catch(() => null);
+    r.room = await page.$eval("#dual-room", e => e.textContent).catch(() => null);
+    r.result_warnings = await page.$$eval("#result-warnings li", ls => ls.map(l => l.innerText.replace(/\s+/g, " ").trim().slice(0, 200)));
     await page.screenshot({ path: path.join(outDir, "05_result.png"), fullPage: true });
     await page.locator("#result-card").screenshot({ path: path.join(outDir, "06_result_card.png") });
     r.ok = r.mode_dual_checked && !r.reject_visible && r.region_paths.length === 4 && r.mapping.length === 4
-      && r.result_heading.includes("Software checks passed") && r.sha_matches_verified
+      && (r.result_heading.includes("Software checks passed") || r.result_heading.includes("Verified with warnings")) && r.sha_matches_verified
       && /T0 \d+\/\d+ · T1 (\d+)\/\1/.test(r.regions_text);
   }
   fs.writeFileSync(path.join(outDir, "e2e_result.json"), JSON.stringify(r, null, 1));

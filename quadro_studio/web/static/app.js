@@ -546,11 +546,14 @@
     body.innerHTML = "";
     const v = s.verify || {};
     if (s.state === "passed" && v.mode === "dual") {
-      $("result-h").textContent = "Software checks passed";
+      const withWarn = (v.warnings || []).length > 0;
+      $("result-h").textContent = withWarn ? "Verified with warnings" : "Software checks passed";
       const reg = v.region_layers_ok || {};
       body.innerHTML = `
-        <div class="ok-box">Software checks passed</div>
+        <div class="ok-box${withWarn ? " warnbox" : ""}" id="verdict">${withWarn ? "Verified with warnings" : "Software checks passed"}</div>
         <div class="facts">
+          ${v.flow_warning ? `<span>Moves where both heads keep the slicer amount although the models need different amounts</span><b id="flow-moves">${v.flow_warning.moves}</b>
+          <span>Largest flow difference between the two models</span><b id="flow-max">${fmt(v.flow_warning.max_diff_pct, 1)} % (${fmt(v.flow_warning.max_ratio, 2)}×)</b>` : ""}
           <span>Colour regions reproduced (per head, all layers)</span><b id="dual-regions">${["T0", "T1", "T2", "T3"].map(h => `${h} ${reg[h] || "–"}`).join(" · ")}</b>
           <span>Colour alignment (Y) left / right model</span><b id="dual-y">${fmt((v.registration_mm || {}).left, 3)} / ${fmt((v.registration_mm || {}).right, 3)} mm (limit ${fmt((v.limits || {}).y_registration, 2)})</b>
           <span>Height (Z) where colours stack, largest deviation</span><b id="dual-z">${fmt(v.z_deviation_mm, 3)} mm (limit ${fmt((v.limits || {}).z_deviation, 2)})</b>

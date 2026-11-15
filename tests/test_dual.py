@@ -210,15 +210,35 @@ class DualMode(unittest.TestCase):
             load_dual(p)
         self.assertIn("DUAL_NOT_COPYABLE", cm.exception.diags.render())
 
-    def test_inconsistent_offsets_output_blocked_by_independent_flow(self):
+    def test_inconsistent_offsets_output_flow_warning_but_room_short(self):
         plan, d = make_dual_plan(self.dual, self.bad_prof)
         text, _ = generate_dual(self.dual, self.bad_prof, plan)        # forced, for the verifier only
         res, sim = self.verify_text(text, self.bad_prof)
         self.assertFalse(res["passed"])
-        self.assertIn("DUAL_SYNC_FLOW", res["issue_counts"])              # both rooms positive: never auto-accepted
-        self.assertIn("DUAL_SMALL_NEGATIVE_ROOM", res["issue_counts"])    # the small negative room: warning only
+        self.assertIn("DUAL_STACK_ROOM", res["issue_counts"])             # room checks stay blocking
+        self.assertIn("DUAL_SMALL_NEGATIVE_ROOM", res["issue_counts"])    # warning
         self.assertNotIn("DUAL_INTO_MATERIAL", res["issue_counts"])
-        self.assertAlmostEqual(res["dual_registration_mm"]["left"], 0.21, delta=2e-3)
+
+    def test_flow_mismatch_with_enough_room_is_a_warning_in_planner_and_verifier(self):
+        p = load_profile(synth_profile.build(os.path.join(self.tmp, "zmm.zip"), offsets=GROW_MISMATCH))[0]
+        # colours swap halves every 10 layers; the two halves one line apart, as a slicer places them
+        dual = load_dual(synth_dual.write(os.path.join(self.tmp, "gap.gcode"), layers=LAYERS, gap=0.42))[0]
+        plan, d = make_dual_plan(dual, p)
+        self.assertTrue(d.ok(), d.render())
+        self.assertIn("PLAN_FLOW_MISMATCH", {w.code for w in d.warnings})
+        fw = plan.flow_warning
+        self.assertGreater(fw["moves"], 0)
+        self.assertGreaterEqual(min(fw["where"]["room_left"], fw["where"]["room_right"]), 0.08)
+        text, _ = generate_dual(dual, p, plan)
+        out = os.path.join(self.tmp, "gap_out.gcode")
+        with open(out, "w") as f:
+            f.write(text)
+        res, _ = verify_dual(p, dual.models, out, plan.foundation_layers)
+        self.assertTrue(res["passed"], [i for i in res["issues"] if i["severity"] == "error"][:3])
+        self.assertIn("DUAL_FLOW_MISMATCH", res["issue_counts"])
+        vf = res["dual_sync_flow"]["flow_warning"]
+        self.assertGreater(vf["moves"], 0)
+        self.assertAlmostEqual(vf["max_diff_pct"], fw["max_diff_pct"], delta=3.0)   # same decision, same size
 
     def test_room_analysis_conditions(self):
         plan, d = make_dual_plan(self.dual, self.bad_prof)

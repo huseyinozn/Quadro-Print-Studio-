@@ -177,6 +177,7 @@ def analyse_room(plan, za, room_min, t_layer=(0.08, 0.30), flow_tol=0.017, width
         res["sync_as_planned"] = dict(first_conflict=sp0["first_conflict"], stats=sp0["stats"])
         res["sync_with_compensation"] = dict(first_conflict=sp1["first_conflict"], stats=sp1["stats"], examples=sp1["examples"])
         res["sync_flow_failures"] = sp1["examples"]
+        res["flow_warning"] = sp1["stats"].get("flow_warning")
     else:
         res["sync_flow_failures"] = []
     centre_ok = all(ok_room(a["centre_min"], room_min) for a in after.values()) and (bool(changed) or not pos_short)
@@ -210,6 +211,7 @@ def sync_flow_points(dual, plan, room_min, flow_tol=0.017, uA=None, uB=None, spa
     """
     from .dualz import _Lattice, _samples, _kernel, RES
     from .dualplan import PAIR
+    EPS_ = EPS
     uA = uA or {}
     uB = uB or {}
     F = plan.foundation_layers
@@ -329,6 +331,29 @@ def sync_flow_points(dual, plan, room_min, flow_tol=0.017, uA=None, uB=None, spa
                 # independent flow mismatch: both rooms positive and the one E fits only one head
                 indep = bad & (ra > 0) & (rb > 0)
                 stats["independent_points"] = stats.get("independent_points", 0) + int(indep.sum())
+                # owner rule: enough positive room under BOTH heads and only the amount differs -> quality
+                # warning; both heads use the slice E of that move
+                flow_w = indep & (ra >= room_min - EPS_) & (rb >= room_min - EPS_)
+                if flow_w.any():
+                    mvw = np.unique(pa["k"][flow_w])
+                    fw = stats.setdefault("flow_warning", dict(points=0, moves=0, max_ratio=1.0, max_diff_pct=0.0, where=None, examples=[]))
+                    fw["points"] += int(flow_w.sum())
+                    fw["moves"] += len(mvw)
+                    rat = np.where(flow_w, np.maximum(need_a, need_b) / np.maximum(np.minimum(need_a, need_b), 1e-9), 1.0)
+                    dif = np.where(flow_w, np.abs(need_a - need_b) * 100.0, 0.0)
+                    q = int(np.argmax(dif))
+                    if dif[q] > fw["max_diff_pct"]:
+                        m = pa["ext"][int(pa["k"][q])]
+                        fw["max_diff_pct"], fw["max_ratio"] = float(dif[q]), float(rat[q])
+                        fw["where"] = dict(layer=L, pair="T%d+T%d" % (a, b), slicer_line=m.line, room_left=round(float(ra[q]), 4),
+                                           room_right=round(float(rb[q]), 4), e_left_pct=round(float(need_a[q]) * 100, 1),
+                                           e_right_pct=round(float(need_b[q]) * 100, 1), e_applied_pct=100.0)
+                    if len(fw["examples"]) < max_items:
+                        m = pa["ext"][int(pa["k"][q])]
+                        fw["examples"].append(dict(layer=L, pair="T%d+T%d" % (a, b), slicer_line=m.line,
+                                                   room_left=round(float(ra[q]), 4), room_right=round(float(rb[q]), 4),
+                                                   e_left_pct=round(float(need_a[q]) * 100, 1), e_right_pct=round(float(need_b[q]) * 100, 1)))
+                    bad = bad & ~flow_w
                 comp = both & ~bad & ((np.abs(need_a - 1.0) > flow_tol) | (np.abs(need_b - 1.0) > flow_tol))
                 stats["compensated_points"] += int(comp.sum())
                 if bad.any():

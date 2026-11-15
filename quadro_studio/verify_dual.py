@@ -153,6 +153,23 @@ class DualSim(Sim):
             q = int(np.nonzero(small)[0][0])
             self.issue("warning", "DUAL_SMALL_NEGATIVE_ROOM", "T%d+T%d layer %d: no common E (room %.3f / %.3f mm); small negative room "
                        "accepted, slice E applied (needs %.0f %% / %.0f %%)" % (a, b, L, ra[q], rb[q], na[q] * 100, nb[q] * 100), ea[q][0])
+        # owner rule: both heads have enough positive room and only the amount differs -> warning, slice E used
+        hmin = self.h_limits[0]
+        flow_w = indep & (ra >= hmin - EPS) & (rb >= hmin - EPS)
+        if flow_w.any():
+            fw = st.setdefault("flow_warning", dict(pieces=0, moves=0, max_diff_pct=0.0, max_ratio=1.0, where=None))
+            fw["pieces"] += int(flow_w.sum())
+            fw["moves"] += len({ea[i][0] for i in np.nonzero(flow_w)[0]})
+            dif = np.where(flow_w, np.abs(na - nb) * 100.0, 0.0)
+            q = int(np.argmax(dif))
+            if dif[q] > fw["max_diff_pct"]:
+                fw["max_diff_pct"] = float(dif[q])
+                fw["max_ratio"] = float(max(na[q], nb[q]) / max(min(na[q], nb[q]), 1e-9))
+                fw["where"] = dict(line=ea[q][0], pair="T%d+T%d" % (a, b), layer=L, room_a=round(float(ra[q]), 4),
+                                   room_b=round(float(rb[q]), 4), e_a_pct=round(float(na[q]) * 100, 1), e_b_pct=round(float(nb[q]) * 100, 1))
+            self.issue("warning", "DUAL_FLOW_MISMATCH", "T%d+T%d layer %d: enough room on both models (%.3f / %.3f mm) but they need "
+                       "%.0f %% / %.0f %% of the slice E; slice E used" % (a, b, L, ra[q], rb[q], na[q] * 100, nb[q] * 100), ea[q][0])
+            indep = indep & ~flow_w
         if indep.any():
             st["independent"] += int(indep.sum())
             q = int(np.nonzero(indep)[0][0])

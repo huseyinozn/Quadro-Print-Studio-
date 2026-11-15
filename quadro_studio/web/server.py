@@ -294,7 +294,7 @@ class App:
                 base = os.path.splitext(job.inputs["model"])[0][:60] or "model"
                 job.gcode_name = "%s_%s_%dx.gcode" % (base, job.inputs["mode"], job.inputs["count"])
                 job.state = "passed"
-                job.message = "Software checks passed."
+                job.message = ("Verified with warnings." if (job.verify_summary or {}).get("warnings") else "Software checks passed.")
             else:
                 job.state = "failed"
                 job.message = "Verification failed. The file cannot be downloaded."

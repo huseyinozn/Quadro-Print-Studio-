@@ -117,7 +117,7 @@ class WebFlow(WebBase):
         self.assertEqual(st, 403)                    # nothing before verification
         s = self.run_job(r["job_id"])
         self.assertEqual(s["state"], "passed", s)
-        self.assertEqual(s["message"], "Software checks passed.")
+        self.assertIn(s["message"], ("Software checks passed.", "Verified with warnings."))
         st, data, hdr = self.req(s["download_url"])
         self.assertEqual(st, 200)
         self.assertEqual(hashlib.sha256(data).hexdigest(), s["gcode_sha256"])
