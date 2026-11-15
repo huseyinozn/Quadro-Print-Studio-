@@ -113,12 +113,23 @@
     const zipName = j.filename.replace(/\.gcode$/, "") + ".gcode.zip";
     let dl = null;
     try { dl = window.claude && window.claude.use ? await window.claude.use("downloads") : null; } catch (err) { dl = null; }
+    if (!dl && window.claude) {
+      // inside claude.ai the viewer only offers saving to members of the page owner's organization
+      if (note) {
+        const pub = window.QPS_PUBLIC_URL;
+        note.innerHTML = "";
+        note.append("Downloads on this page are only available to members of its owner's organization." + (pub ? " Open the public site to download your file: " : ""));
+        if (pub) { const l = document.createElement("a"); l.href = pub; l.target = "_blank"; l.rel = "noopener"; l.textContent = pub; note.append(l); }
+      }
+      return;
+    }
     if (dl) {
       try {
         await dl.save({ filename: zipName, data: j.zip });
         if (note) note.textContent = "Saved " + zipName + ". Unzip it to get " + j.filename + ".";
       } catch (err) {
-        if (note) note.textContent = err && err.code === "declined" ? "Download cancelled." : "This view cannot save files. Open the page in a browser tab and try again.";
+        if (note) note.textContent = err && err.code === "declined" ? "Download cancelled."
+          : "This view cannot save files." + (window.QPS_PUBLIC_URL ? " Open the public site to download: " + window.QPS_PUBLIC_URL : " Open the page in a browser tab and try again.");
       }
       return;
     }

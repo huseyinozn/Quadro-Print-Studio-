@@ -38,6 +38,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--pages", action="store_true",
                     help="standalone static host (GitHub Pages): index.html is a full document")
+    ap.add_argument("--public-url", default="", help="address of the public copy, offered where downloads are not allowed")
     a = ap.parse_args()
     out = os.path.abspath(a.out)
     if os.path.exists(out):
@@ -85,10 +86,10 @@ def main():
     page = ("<title>Quadro Print Studio</title>\n"
             '<meta name="claude:viewport-fit-sides" content="cover">\n'
             '<meta name="description" content="Prepare multi-head prints for the Co Print Quadro.">\n'
-            "<style>\n%s\n</style>\n%s\n<script>\n%s\n</script>\n<script>\n%s\n</script>\n"
+            "<style>\n%s\n</style>\n%s\n<script>window.QPS_PUBLIC_URL = %s;</script>\n<script>\n%s\n</script>\n<script>\n%s\n</script>\n"
             "<script>\nwindow.QPS_READY.then(() => { const b = document.getElementById('boot'); if (b) b.textContent = 'Converter ready.'; })"
             ".catch((e) => { const b = document.getElementById('boot'); if (b) b.textContent = 'The converter could not start in this browser: ' + e.message; });\n"
-            "</script>\n" % (css, body, open(os.path.join(ROOT, "site", "local_api.js"), encoding="utf-8").read(), app))
+            "</script>\n" % (css, body, json.dumps(a.public_url), open(os.path.join(ROOT, "site", "local_api.js"), encoding="utf-8").read(), app))
     if a.pages:
         page = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
                 '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">\n'
