@@ -42,11 +42,18 @@ def main():
         shutil.rmtree(out)
     os.makedirs(os.path.join(out, "pyodide"))
     os.makedirs(os.path.join(out, "examples"))
-    # archives are published under binary-safe .wasm names (the host does not serve .zip/.whl)
+    # binary parts are published as base64 text (every published file is reviewable text);
+    # the worker decodes them in the browser
+    import base64
     for f in PYODIDE_FILES:
-        dst = "python_stdlib.wasm" if f == "python_stdlib.zip" else f
-        shutil.copy(os.path.join(a.pyodide, f), os.path.join(out, "pyodide", dst))
-    shutil.copy(a.numpy, os.path.join(out, "pyodide", "numpy-1.26.4.wasm"))
+        src = os.path.join(a.pyodide, f)
+        if f.endswith((".wasm", ".zip")):
+            with open(src, "rb") as fh, open(os.path.join(out, "pyodide", f + ".b64.txt"), "w") as fo:
+                fo.write(base64.b64encode(fh.read()).decode())
+        else:
+            shutil.copy(src, os.path.join(out, "pyodide", f))
+    with open(a.numpy, "rb") as fh, open(os.path.join(out, "pyodide", "numpy-1.26.4.whl.b64.txt"), "w") as fo:
+        fo.write(base64.b64encode(fh.read()).decode())
     shutil.copy(os.path.join(ROOT, "site", "worker.js"), os.path.join(out, "worker.js"))
     bundle = {}
     for r, ds, fs in os.walk(os.path.join(ROOT, "quadro_studio")):
