@@ -76,7 +76,7 @@ a.download { display: block; text-align: center; text-decoration: none; backgrou
 .checks ul { padding-left: 18px; color: var(--muted); }
 .alt { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 8px; }
 .ok-box { background: var(--ok-bg); color: var(--ok); border-radius: 10px; padding: 12px; font-weight: 600; }
-.facts { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; font-size: .9rem; color: var(--muted); margin: 10px 0; }
+.facts { display: grid; grid-template-columns: minmax(48%, 1fr) auto; gap: 4px 12px; font-size: .9rem; color: var(--muted); margin: 10px 0; }
 .facts b { color: var(--ink); font-weight: 600; text-align: right; }
 .fine { color: var(--muted); font-size: .85rem; }
 .fine.hash { word-break: break-all; }
