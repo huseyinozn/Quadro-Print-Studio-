@@ -234,6 +234,21 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(d.ok(), d.render())
         self.assertEqual(len(plan.slots), 6)
 
+    def test_auto_layout_centres_y_offset_shift(self):
+        """Copies of T1-T3 are shifted in Y by their offsets: whenever the auto search accepts an
+        arrangement, the shifted copies must still lie inside the measured mesh (one-sided Y offsets)."""
+        offs = {"T0": {"x": 0.0, "y": 0.0, "z": 0.0}, "T1": {"x": 0.14, "y": -1.63, "z": 0.30},
+                "T2": {"x": -1.03, "y": -1.54, "z": 0.19}, "T3": {"x": -0.95, "y": -1.18, "z": 0.14}}
+        prof, _ = load_profile(synth_profile.build(os.path.join(self.tmp, "yoff.zip"), offsets=offs))
+        fitted = 0
+        for n in range(4, 404, 4):
+            plan, d = make_plan(self.model, prof, LayoutOptions(count=n, preset="auto", foundation_layers=3))
+            if plan is None:
+                continue
+            fitted += 1
+            self.assertNotIn("PLAN_MESH_COVERAGE", d.render(), "count %d" % n)
+        self.assertGreater(fitted, 10)
+
 
 if __name__ == "__main__":
     unittest.main()

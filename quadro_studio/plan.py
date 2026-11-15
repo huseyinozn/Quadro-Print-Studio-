@@ -260,7 +260,9 @@ def auto_layout(model, prof, o, k):
             span_x = (nh - 1) * sync + (cols - 1) * cp + W
             span_y = (rows - 1) * rp + H + dy
             if span_x <= (ux1 - ux0) - 1e-9 and span_y <= (uy1 - uy0) - 1e-9:
-                return (cols, sync, cp, rp, 0.5 * (ux0 + ux1), 0.5 * (uy0 + uy1))
+                # the T0 block sits at the returned centre; head t's copies are shifted by -oy_t, so
+                # centre the union of all heads' blocks (not the T0 block) on the usable area
+                return (cols, sync, cp, rp, 0.5 * (ux0 + ux1), 0.5 * (uy0 + uy1) + 0.5 * (max(oys) + min(oys)))
         g -= 0.25
     return None
 
